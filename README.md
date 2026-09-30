@@ -49,9 +49,15 @@ as `None`, which is not the same as `False`.
 
 ## Models
 
-Any model these five providers serve is reachable: the endpoint row carries the host and
-the wire, and the model id is just a string in the request. What varies is how much franca
-*knows* about a given model, and that is what the profile table answers.
+**Every model these five providers serve is callable.** Reachability is what an endpoint
+row and a dialect adapter buy you, and both exist for all five: `gpt-6-astra`,
+`gemini-3.8-flash`, `grok-4.6`, `deepseek-v4-pro` and the Claude models are all one request
+away. Nothing below narrows that.
+
+What varies is how much franca has *measured* about a given model, which is a different
+question and the one the profile table answers. A measured row is not permission to call a
+model — it is a record of what that model accepts on the wire, so franca can refuse an
+illegal parameter locally, with a field path, instead of paying a round trip to find out.
 
 A model id is normalised before it is matched, so every spelling of one model lands on one
 row. An `anthropic.` / `openai.` / `google.` vendor namespace is stripped, as are the `[1m]`
@@ -59,8 +65,10 @@ context marker, an `@YYYYMMDD` or `-YYYYMMDD` snapshot date and `-latest`; the l
 matching `model_prefix` then wins, and that row is overlaid on the provider's default, so a
 row states only what it measured and inherits the rest.
 
-Six rows carry measured contracts, all Anthropic. Each cell below was obtained by sending
-the parameter to the live API and recording whether the request was legal:
+Six rows carry measured contracts, and they are all Anthropic today — not because the
+other providers are second class, but because no working key for them was available when
+the sweep was taken. Each cell below was obtained by sending the parameter to the live API
+and recording whether the request was legal:
 
 | Model prefix | Sampling | Thinking | Token budget | Effort | Prefill | Verified |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -77,7 +85,15 @@ for per-model rows over an `if provider ==` branch.
 
 Every other model resolves to its provider's default row, which claims `streaming` and
 nothing else — each remaining capability is `None`, meaning nobody has checked. `None` is
-not `False`: franca sends the parameter rather than refusing the call locally.
+not `False`, and the difference runs the permissive way: with no measured row franca
+**sends** the parameter and lets the provider judge it. An unmeasured model is fully
+callable; it just gets no local pre-flight. Closing that gap is a data change in
+`chat/profiles.py` and needs no code.
+
+One genuine coverage limit, as distinct from an unmeasured one: three of the five planned
+chat dialects are implemented. `openai_responses` and `google_interactions` have ids
+reserved in `core/ids.py` but no adapter yet, so OpenAI models are reachable through Chat
+Completions rather than `/v1/responses`.
 
 ## Install
 
