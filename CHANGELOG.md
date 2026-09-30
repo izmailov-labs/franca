@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-30
+
+### Added
+
+- `tests/chat/test_dialect_unification.py`: the "one request, every wire" claim, held
+  offline. One `PromptPackage` is rendered through all three adapters and checked for
+  what each wire must carry, the name each gives the output budget, and whether the
+  model id belongs in the body or the path. The only other test driving more than one
+  adapter lives in `tests/mock`, which is deselected by default, so nothing in the
+  default suite held the adapters to this before.
+
+### Changed
+
+- `README.md` now shows the unification rather than asserting it: one package printed as
+  the three bodies the adapters emit, and the two responses converging on identical
+  `items` and `usage`. Adds a dated per-provider model list, marked as orientation --
+  franca reads none of it, so a new model id works the day the provider ships it -- and
+  reworks the Models section, which opened on the Anthropic profile rows and so read as
+  though only Anthropic models were supported. All five providers are callable; only
+  Anthropic's contracts have been measured.
+
+
 ## [0.1.0] - 2026-09-29
 
 ### Added
@@ -52,5 +74,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wire. Nothing in franca changed between the sweeps; the provider did, which is
   the case `verified` dates exist for.
 
-[Unreleased]: https://github.com/izmailov-labs/franca/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/izmailov-labs/franca/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/izmailov-labs/franca/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/izmailov-labs/franca/releases/tag/v0.1.0
