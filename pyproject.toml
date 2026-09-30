@@ -82,7 +82,7 @@ dev = [
   "pytest-cov>=7.1",
   # Ruff has no 1.0 and does not follow semver below it: a minor bump can change
   # which rules fire. Pinned exactly so lint results only change deliberately.
-  "ruff==0.16.6",
+  "ruff==0.16.9",
 ]
 
 [tool.uv]
