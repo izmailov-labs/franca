@@ -1,0 +1,99 @@
+graph TD
+
+  PKG["PromptPackage"]
+
+  subgraph L1["1 CONFIG + DI - M2"]
+    direction LR
+    SET["Settings"]
+    PSET["ProviderSettings + RoutePolicy"]
+    RGST{{"Registrar + CapabilitySpec"}}
+    SET --> PSET
+  end
+
+  subgraph L2["2 RESOLVE - M2"]
+    direction LR
+    PROF(["ProfileTable.resolve"])
+    REQ["Requirements vs EndpointFeatures"]
+    SELD(["select_dialect"])
+    SELN["Selection: endpoint + dialect"]
+    PROF --> REQ --> SELD --> SELN
+  end
+
+  subgraph L3["3 PIPELINE - M2 M6"]
+    direction LR
+    WRAP(["wrap()"])
+    CHAIN["TraceClient, tools, RetryClient, LintClient"]
+    FBC["FallbackClient"]
+    WRAP --> CHAIN
+    FBC -.->|wraps chain| CHAIN
+  end
+
+  LEAF["ChatModel leaf: prepare, build, complete, stream"]
+
+  subgraph L4["4 ADAPTERS - M0 M3-M5"]
+    direction LR
+    ADP{{"Adapter / StreamingAdapter / JobAdapter"}}
+    DADP["DialectAdapter + common.py helpers"]
+    FIVE["five dialect adapters: Anthropic, OpenAI x2, Google x2"]
+    ADP --> DADP --> FIVE
+  end
+
+  subgraph L5["5 CONNECTOR - M0"]
+    direction LR
+    WREQ["WireRequest"]
+    ENDP["Endpoint + EndpointFeatures"]
+    KEYP{{"KeyProvider"}}
+    CONN["Connector: headers, send, stream"]
+    MERR["ModelError + failure_class"]
+    WREQ --> CONN
+    ENDP --> CONN
+    KEYP -.->|key at call time| CONN
+    CONN -.->|status map| MERR
+  end
+
+  subgraph L6["6 TRANSPORT - M0 M1"]
+    direction LR
+    TRSP{{"Transport"}}
+    CLK{{"Clock"}}
+    RRES["RawResponse"]
+    RSTR["RawStream, parse_sse, SseEvent"]
+    TRSP --> RRES
+    TRSP --> RSTR
+  end
+
+  subgraph L7["7 RESPONSE IR - M0 M1"]
+    direction LR
+    MRES["ModelResponse + Usage + CallTrace"]
+    DELTA["Delta stream events"]
+  end
+
+  subgraph L8["8 JOBS + MEDIA - M7 M8"]
+    direction LR
+    JMOD["JobModel: VideoModel, ImageModel"]
+    POLL(["submit, poll vs deadline, 408 or 422"])
+    JMOD --> POLL
+  end
+
+  PKG -->|"spec str"| PROF
+  PSET -.-> PROF
+  RGST -.->|adapters, endpoints| SELD
+  SELN -->|attached to the leaf| WRAP
+  CHAIN --> LEAF
+  LEAF -->|to_request| ADP
+  ADP --> WREQ
+  SET -.->|timeouts, headers| CONN
+  CONN -->|bytes| TRSP
+  CLK -.->|sleep, monotonic| CHAIN
+  RRES -->|from_response| MRES
+  RSTR -->|from_stream| DELTA
+  ADP -.-> JMOD
+  CLK -.-> POLL
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  classDef ir fill:#f2efe6,stroke:#7a6a3f,stroke-width:2px;
+  classDef pure fill:#f4efe2,stroke:#8a6d1f,stroke-width:2px;
+  classDef spine fill:#f4ece0,stroke:#a2662a,stroke-width:3px;
+  class TRSP,CLK,KEYP,ADP,RGST seam;
+  class MRES,DELTA,WREQ,RRES,RSTR ir;
+  class PROF,SELD,WRAP,POLL pure;
+  class PKG,LEAF,CONN spine;

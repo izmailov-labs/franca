@@ -1,0 +1,15 @@
+{
+  "exchanges": [
+    {
+      "method": "POST",
+      "url": "https://api.anthropic.com/v1/messages",
+      "request": "{\"max_tokens\":64,\"messages\":[{\"content\":[{\"text\":\"Say hi in three words.\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"claude-opus-4-5\",\"system\":\"You are terse.\"}",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json",
+        "request-id": "req_011CQhandwrittenM0"
+      },
+      "body": "{\"id\":\"msg_011CQhandwrittenM0\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-5-20251101\",\"content\":[{\"type\":\"text\",\"text\":\"Hi there, friend.\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":17,\"output_tokens\":5,\"cache_read_input_tokens\":1024,\"cache_creation_input_tokens\":256}}"
+    }
+  ]
+}

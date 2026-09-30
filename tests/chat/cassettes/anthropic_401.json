@@ -1,0 +1,14 @@
+{
+  "exchanges": [
+    {
+      "method": "POST",
+      "url": "https://api.anthropic.com/v1/messages",
+      "request": "{\"max_tokens\":64,\"messages\":[{\"content\":[{\"text\":\"Say hi in three words.\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"claude-opus-4-5\",\"system\":\"You are terse.\"}",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}"
+    }
+  ]
+}

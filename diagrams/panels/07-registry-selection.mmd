@@ -1,0 +1,30 @@
+graph TD
+  SPEC["spec string<br/>anthropic:claude-opus-5"] --> PARSE[parse_spec]
+  PARSE -->|"provider + model"| PROF
+  PARSE -.->|"bare model id"| INFER[infer_provider]
+  INFER -.->|"base_url host, then model_prefix, then keyed"| PROF
+
+  subgraph REGIN["Registry inputs"]
+    REG([Registrar])
+    CS[CapabilitySpec]
+  end
+  REG -->|"endpoint, adapter, native, profiles"| CS
+
+  PROF(["ProfileResolver<br/>ProfileTable.resolve"]) -->|"longest prefix, exclude_unset overlay"| CP[ChatProfile]
+  CS -.->|"spec.profiles"| PROF
+
+  PKG[PromptPackage] -->|requirements_from| REQ[Requirements]
+
+  REQ -->|"1 pin: dialect= or ProviderSettings.dialect"| SEL[select_dialect]
+  CP -->|"2 profile constraint: tools_require_dialect"| SEL
+  CS -->|"3 native_dialect first, then declaration order"| SEL
+
+  SEL --> SELN["Selection<br/>via: pin, profile, native, fallback"]
+  SELN -->|"endpoint into connector_factory"| CONN[Connector]
+  SELN -->|"adapters[selection.dialect]"| ADP[DialectAdapter]
+  CONN --> LEAF["Model (leaf)<br/>ChatModel"]
+  ADP --> LEAF
+  CP -.->|profile| LEAF
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  class PROF,REG seam;

@@ -1,0 +1,56 @@
+graph LR
+  subgraph KEYS["core/keys.py"]
+    KP(["KeyProvider"])
+    SKP["SettingsKeyProvider"]
+    STKP["StaticKeyProvider"]
+    VENV[("VENDOR_ENV")]
+  end
+
+  subgraph ENUMG["core/enums.py"]
+    AUTHS["AuthScheme"]
+  end
+
+  subgraph EPG["core/endpoint.py"]
+    EP["Endpoint"]
+    FEAT["EndpointFeatures"]
+    REQS["Requirements, Selection<br/>SelectionVia"]
+  end
+
+  subgraph CONNG["core/connector.py"]
+    CONN["Connector"]
+    HDRS["headers(wire)"]
+    SEND["send(wire)"]
+    STREAM["stream(wire)"]
+  end
+
+  MAP{{"Connector status mapping"}}
+  ERR["ModelError"]
+  TR(["Transport"])
+
+  SKP -.->|"key_for(provider)"| KP
+  STKP -.->|"key_for(provider), test keys"| KP
+  SKP -->|"api_key then api_key_env then FRANCA_ env then vendor env"| VENV
+
+  EP -->|"features: True verified / False absent / None unverified"| FEAT
+  EP -->|"auth: x-api-key, bearer, x-goog-api-key"| AUTHS
+  EP -.->|"select_dialect: see 07"| REQS
+
+  EP -->|"endpoint: url() = base_url + path"| CONN
+  KP -.->|"keys: key read at CALL time, not construction"| CONN
+  TR -.->|"transport: post, get, post_stream"| CONN
+
+  CONN -->|"AuthScheme + extra_headers"| HDRS
+  CONN -->|"bytes = wire.content or _json.dumps(wire.body)"| SEND
+  CONN -->|"SseEvent iterator"| STREAM
+
+  HDRS -->|"no API key: failure_class=auth, retryable=False"| ERR
+  SEND -->|"RawResponse.status"| MAP
+  STREAM -->|"status 4xx or 5xx: read JSON body before any event"| MAP
+
+  MAP -->|"401/403 auth; 429 rate_limit retryable, Retry-After"| ERR
+  MAP -->|"408/409/425/5xx provider retryable; other 4xx provider"| ERR
+  MAP -->|"transport exceptions transport; undecodable JSON parse"| ERR
+  MAP -.->|"adapter.error_from may refine"| ERR
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  class KP,TR seam;

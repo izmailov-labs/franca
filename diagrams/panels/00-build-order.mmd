@@ -1,0 +1,37 @@
+graph TD
+  T["Transport<br/>M0"]
+  CN["Connector + Endpoint<br/>M0 / M2"]
+  AD["Adapter + WireRequest<br/>M0"]
+  MD["Model + IR<br/>M0"]
+  FIRST{{"FIRST CALL WORKS"}}
+  ST["Streaming<br/>M1"]
+  RG["Registry + Selection<br/>M2"]
+  CF["Config + DI<br/>M2"]
+  IR3["Full IR + conformance<br/>M3"]
+  MW["Middleware<br/>M2 / M6"]
+  DL["OpenAI + Google dialects<br/>M4 / M5"]
+  IM["Image<br/>M7"]
+  VD["Video<br/>M8"]
+  SH(["Ship<br/>M9"])
+
+  T -->|"RawResponse, RawStream"| CN
+  CN -->|"status map, Retry-After"| AD
+  AD -->|"to_request / from_response"| MD
+  MD -->|"Model.complete stamps CallTrace"| FIRST
+  FIRST -->|"same chain, second method"| ST
+  ST -->|"Model.stream, Delta, ChatStream"| RG
+  RG -->|"select_dialect, ModelRegistry"| CF
+  CF -->|"load_settings, Registrar"| IR3
+  IR3 -->|"RetryClient, TraceClient"| MW
+  IR3 -->|"ChatConformanceSuite, golden matrix"| DL
+  CF -.->|"ImageModel, OpenAIImagesAdapter"| IM
+  CF -.->|"JobModel, XaiVideoAdapter"| VD
+  MW -->|"FunctionInvokingClient, FallbackClient"| SH
+  DL -->|"franca.testing"| SH
+  IM -->|"ImageConformanceSuite"| SH
+  VD -->|"VideoConformanceSuite"| SH
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  classDef cut fill:#f7d9a0,stroke:#b35c00,stroke-width:4px;
+  class T,AD seam;
+  class FIRST cut;

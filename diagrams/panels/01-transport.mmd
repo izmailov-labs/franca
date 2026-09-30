@@ -1,0 +1,39 @@
+graph LR
+  subgraph IMPLS["Transport implementations"]
+    H["HttpxTransport"]
+    S["ScriptedTransport"]
+    RT["RecordingTransport"]
+  end
+  T{{"Transport<br/>Protocol"}}
+  subgraph RES["Result types"]
+    RR["RawResponse"]
+    RS["RawStream"]
+  end
+  subgraph CLOCKS["Clock implementations"]
+    AC["AsyncioClock"]
+    FC["FakeClock"]
+  end
+  CK{{"Clock<br/>Protocol"}}
+  CN["Connector"]
+  MD["Model (leaf)"]
+  RC["RetryClient"]
+
+  H -.->|implements| T
+  S -.->|"replays Cassette"| T
+  RT -.->|"records + scrub"| T
+  RT -->|inner| H
+  AC -.->|implements| CK
+  FC -.->|"no real sleep"| CK
+
+  T -->|"post / get"| RR
+  T -->|post_stream| RS
+  CN -.->|"content bytes: see 04"| T
+  RR -.->|"json body: see 04"| CN
+  RS -.->|"parse_sse: see 05"| CN
+  CK -->|"wall: Retry-After"| CN
+  CK -->|"monotonic: latency_ms"| MD
+  CK -->|"sleep: backoff"| RC
+  RC -->|"retry wraps exactly one wire call"| MD
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  class T,CK seam;

@@ -1,0 +1,25 @@
+graph LR
+  REQ[VideoRequest] --> PREP(VideoModel.prepare)
+  PREP -->|"duration_s within max_duration_s<br/>resolution in resolutions"| SUB
+
+  subgraph JAG["JobAdapter (video/dialects/xai_video.py)"]
+    SUB[to_submit]
+    POLL(poll_request)
+    PARSE[job_from_poll]
+    RESULT(result)
+  end
+
+  SUB -->|"WireRequest POST"| CONN[Connector]
+  CONN -->|"job_from_submit"| JOB[Job queued]
+  JOB -->|"errors after submit: retryable=False<br/>RetryClient never re-submits"| POLL
+  POLL -.->|"GET"| CONN
+  CONN -.->|"raw"| PARSE
+  CLOCK{{Clock}} -.->|"clock.monotonic() deadline<br/>clock.sleep(poll_interval_s)"| POLL
+  PARSE -->|"running"| POLL
+  PARSE -->|"done"| RESULT
+  RESULT --> RES[VideoResponse]
+  PARSE -->|"failed or expired"| FAIL["JobFailedError<br/>422 provider"]
+  POLL -->|"JobModel.complete: past deadline"| TIMEOUT["JobTimeoutError<br/>408 timeout"]
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  class CLOCK seam;

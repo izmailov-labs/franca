@@ -1,0 +1,48 @@
+{
+  "fixtures": [
+    {
+      "match": { "userMessage": "Name one primary colour." },
+      "response": {
+        "id": "mock-primary-colour",
+        "model": "mock-served-model",
+        "content": "Blue.",
+        "finishReason": "stop",
+        "usage": { "prompt_tokens": 17, "completion_tokens": 5, "total_tokens": 22 }
+      }
+    },
+    {
+      "match": { "userMessage": "Count to six." },
+      "response": {
+        "id": "mock-count-to-six",
+        "model": "mock-served-model",
+        "content": "one two three four five six",
+        "usage": { "prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10 }
+      },
+      "chunkSize": 4
+    },
+    {
+      "match": { "userMessage": "Use a tool." },
+      "response": {
+        "id": "mock-tool-call",
+        "model": "mock-served-model",
+        "toolCalls": [
+          { "id": "call_mock_1", "name": "get_weather", "arguments": { "city": "Lisbon" } }
+        ]
+      }
+    },
+    {
+      "match": { "userMessage": "Rate limit me." },
+      "response": {
+        "error": { "message": "slow down", "type": "rate_limit_error" },
+        "status": 429
+      }
+    },
+    {
+      "match": { "userMessage": "Break." },
+      "response": {
+        "error": { "message": "mock upstream failure", "type": "server_error" },
+        "status": 500
+      }
+    }
+  ]
+}

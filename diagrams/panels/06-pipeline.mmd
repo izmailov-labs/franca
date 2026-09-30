@@ -1,0 +1,42 @@
+graph LR
+  subgraph SEAMS["Injectable seams (Protocols)"]
+    P{{"Client[Req, Res, D]"}}
+    TR{{"Tracer"}}
+    LN{{"Linter[Req]"}}
+  end
+
+  DC["DelegatingClient"]
+  SV["Services"]
+  BL(["builtin_layers()"])
+  W(["wrap()"])
+  ID(["identity"])
+  L["LintClient"]
+  FB["FallbackClient"]
+
+  subgraph CHAIN["Default route layers: trace, tools, retry"]
+    T["TraceClient"]
+    TS["tools slot<br/>FunctionInvokingClient"]
+    R["RetryClient"]
+    LEAF["Model (leaf)<br/>ChatModel / JobModel"]
+  end
+
+  P -->|"complete() and stream()"| DC
+  DC -->|"every middleware subclasses it"| T
+  SV -.->|"clock, tracer, rng, keys, build, bound, state"| BL
+  BL -->|"trace, tools, retry, lint"| W
+  W -->|"outermost first"| T
+  T -->|"one span per call"| TS
+  TS -->|"tools sits outside retry"| R
+  R -->|"retry wraps exactly one wire call"| LEAF
+  TS -.->|"identity when nothing is bound"| ID
+  R -.->|"opt-in hook"| L
+  L -.->|"inert when linter is None"| LEAF
+  FB -->|"RoutePolicy.fallback around the wrapped chain"| T
+  TR -.->|"tracer"| T
+  LN -.->|"linter"| L
+  P -.->|"satisfied structurally"| LEAF
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  classDef leaf fill:#f4ece0,stroke:#a2662a,stroke-width:2px;
+  class P,TR,LN seam;
+  class LEAF leaf;

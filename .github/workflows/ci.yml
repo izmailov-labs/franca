@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# astral-sh/setup-uv publishes immutable releases and no longer moves major tags,
+# so every action below is pinned to a full commit SHA with a version comment.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group dev
+      - run: uv run ruff check --output-format=github .
+      - run: uv run ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group dev
+      - run: uv run mypy
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Full version sweep on Linux, and both ends of the range on macOS and
+        # Windows. The floor catches what has always been broken there; the
+        # ceiling catches what a new release breaks. Settings load from the
+        # filesystem and the environment, where the three platforms disagree.
+        include:
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: ubuntu-latest, python: "3.14" }
+          - { os: macos-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.14" }
+          - { os: windows-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.14" }
+          # 3.15.0 lands 2026-10-01; promote to a required job once it ships.
+          - { os: ubuntu-latest, python: "3.15", experimental: true }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked --group dev
+      # A short basetemp on Windows: pytest builds tmp_path from the test's own
+      # name, and the default root plus a long name can cross MAX_PATH.
+      - run: uv run pytest --cov --cov-report=term-missing
+        if: runner.os != 'Windows'
+      - run: uv run pytest --cov --cov-report=term-missing --basetemp=D:\t
+        if: runner.os == 'Windows'
+
+  encoding:
+    # Any open() or read_text() missing an explicit `encoding=` becomes an error.
+    # Without this the failure only appears on a Windows runner, where the
+    # default is a code page rather than UTF-8, and only for non-ASCII content.
+    runs-on: ubuntu-latest
+    env:
+      PYTHONWARNDEFAULTENCODING: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group dev
+      - run: uv run pytest -q -W error::EncodingWarning --no-cov
+
+  minimums:
+    # Verifies the declared dependency floors (pydantic, whence, httpx) actually
+    # resolve and pass, rather than only ever being tested at their latest versions.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --resolution lowest-direct --group dev
+      - run: uv run pytest
+
+  no-extras:
+    # httpx is the optional `franca[http]` extra, imported lazily inside
+    # HttpxTransport.__init__. Install with runtime dependencies only, so a stray
+    # top-level httpx import fails here rather than in a user's environment.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - name: Import every public module without the http extra
+        run: |
+          uv run --isolated --no-project --with . python -c "
+          import importlib.util, franca, franca.core, franca.chat, franca.transports.httpx
+          assert importlib.util.find_spec('httpx') is None, 'httpx leaked into the base install'
+          print(franca.__name__, franca.__version__)
+          "
+
+  mock:
+    # The `mock` suite: the real HttpxTransport and the real SSE path, driven against
+    # aimock rather than a vendor. It is the only job that exercises HTTP end to end --
+    # `test` runs offline against cassettes, and `contract` needs keys CI does not have,
+    # so without this the socket path is only ever proven on a developer's machine.
+    #
+    # aimock is a node package the suite spawns through npx, pinned to the version in
+    # tests/mock/conftest.py. Node is preinstalled on the runner; setup-node is here to
+    # pin it and to cache nothing else, since npx does its own caching per run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group dev
+      # -ra so a skip -- no npx, a server that never came up -- is visible in the log
+      # rather than passing as a silent green.
+      - run: uv run pytest -m mock tests/mock -ra --no-cov
+
+  build:
+    # Catches broken packaging before it can reach a release tag.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv build --out-dir dist
+      - run: uvx twine check dist/*
+      - name: PEP 561 marker is present in the wheel
+        run: |
+          for whl in dist/*.whl; do
+            unzip -l "$whl" | grep -q "franca/py.typed" \
+              || { echo "::error::$whl ships no franca/py.typed"; exit 1; }
+          done
+      - name: Installed wheel imports cleanly
+        run: |
+          for whl in dist/*.whl; do
+            uv run --isolated --no-project --with "$whl" \
+              python -c "import franca; print(franca.__name__, franca.__version__)"
+          done

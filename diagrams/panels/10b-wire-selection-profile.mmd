@@ -1,0 +1,90 @@
+classDiagram
+    note "Q8 version-bump-protected: WireRequest, EndpointFeatures, Requirements to Selection, the three profile rows. Cross-panel: PromptPackage requirements_from Requirements, and Selection plus WireRequest fold unverified into CallTrace (see 10a)."
+
+    class WireRequest {
+        method: Literal[POST, GET]
+        path: str | None
+        body: dict[str, Any] | None
+        content: bytes | None
+        headers: dict[str, str]
+        stream: bool
+        unverified: frozenset[str]
+    }
+
+    class Endpoint {
+        id: str
+        provider: ProviderField
+        capability: CapabilityField
+        dialect: DialectField
+        base_url: str
+        path: str
+        auth: AuthScheme
+        extra_headers: dict[str, str]
+        features: EndpointFeatures
+        url(path: str | None) str
+    }
+
+    class EndpointFeatures {
+        strict: bool | None
+        server_state: bool | None
+        artifacts: bool | None
+        caching: bool | None
+        hoisting: bool | None
+        streaming: bool | None
+        production: bool = True
+        get(name: str) bool | None
+    }
+
+    class Requirements {
+        pin: Dialect | None
+        needs: frozenset[str]
+        must_be_production: bool = True
+        must_be_verified: bool = False
+        allow_stubs: bool = False
+    }
+
+    class Selection {
+        endpoint: Endpoint
+        dialect: Dialect
+        adapter: str
+        via: SelectionVia
+        unverified: frozenset[str]
+        rejected: tuple[str, ...]
+    }
+
+    class BaseProfile {
+        provider: ProviderField
+        model_prefix: str
+        source: HttpUrl | None
+        verified: date | None
+        notes: str
+        is_verified() bool
+        name() str
+    }
+
+    class ChatProfile {
+        thinking: ThinkingMode | None
+        effort_levels: tuple[str, ...]
+        default_effort: str | None
+        sampling_allowed: bool | None
+        structured_output: Strategy | None
+        tools_require_dialect: Dialect | None
+        default_max_output_tokens: int | None
+        retired: bool | None
+    }
+
+    class ProfileTable {
+        verified_on: date | None
+        profiles: tuple[P, ...]
+        defaults: dict[ProviderField, P]
+        resolve(provider: Provider, model: str) P
+        merged(other: ProfileTable) ProfileTable
+    }
+
+    Endpoint *-- EndpointFeatures : features
+    Selection *-- Endpoint : endpoint
+    BaseProfile <|-- ChatProfile
+    ProfileTable *-- BaseProfile : profiles
+    ProfileTable ..> ChatProfile : resolve
+    Requirements ..> Selection : select_dialect
+    Selection ..> WireRequest : adapter to_request

@@ -1,0 +1,33 @@
+graph LR
+  CS(["ChatStream<br/>async with"])
+  CL["wrapped Client<br/>see 06"]
+  CM["Model (leaf)<br/>ChatModel"]
+  CN["Connector.stream"]
+  TP{{"Transport<br/>post_stream"}}
+  RS{{"RawStream"}}
+  PS["parse_sse"]
+  SE(["SseEvent"])
+  FA{{"adapter.from_stream"}}
+  DL(["Delta"])
+  SA["StreamAccumulator"]
+  MR(["ModelResponse"])
+  CT["CallTrace<br/>ttft_ms, latency_ms"]
+
+  CS -->|"ChatStream(client, pkg)"| CL
+  CL -->|"TraceClient folds TTFT and partial<br/>RetryClient only pre-first-delta"| CM
+  CM -->|"builds with stream=True"| CN
+  CN -->|"WireRequest"| TP
+  TP -->|"async context manager"| RS
+  RS -->|"lines"| PS
+  PS -->|"WHATWG framing, [DONE] ends"| SE
+  SE --> FA
+  FA -->|"exactly one usage delta,<br/>finish always last"| DL
+  DL -->|"the wire's own block index"| CS
+  CM -.->|"stamps the trace on the LAST item"| CT
+  CT -.-> DL
+  CS -->|"push(Delta)"| SA
+  SA -->|"REPLACES usage; response()"| MR
+  CS -.->|"early exit: aclose() or aclosing"| CN
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  class TP,RS,FA seam;

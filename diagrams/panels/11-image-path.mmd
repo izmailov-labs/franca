@@ -1,0 +1,24 @@
+graph TD
+  REQ[ImageRequest] --> PREP(ImageModel.prepare)
+  PROF["ImageProfile"] -.->|"max_n, sizes, max_references, supports_edit"| PREP
+  PREP -->|"n within max_n, size in sizes<br/>references within max_references"| TOREQ
+  PREP -.->|"edit needs supports_edit is not False<br/>ModelError unsupported with a field path"| ERR[ModelError]
+
+  TOREQ(["OpenAIImagesAdapter.to_request"])
+  TOREQ -->|"no references or mask"| GEN["/v1/images/generations"]
+  TOREQ -->|"references or mask"| EDIT["/v1/images/edits"]
+  MP(["encode_multipart(fields, files)"]) -->|"fixed boundary ----franca-boundary"| EDIT
+
+  GEN -->|"body: dict, JSON encoded by the Connector"| WIRE[WireRequest]
+  EDIT -->|"content: bytes, headers Content-Type"| WIRE
+  WIRE -->|"content wins over body"| CONN[Connector.send]
+  CONN -->|"bytes"| TR{{Transport}}
+  TR -->|"RawResponse"| CONN
+  CONN -->|"raw dict"| FROMRES(["adapter.from_response"])
+  FROMRES --> RES[ImageResponse]
+  RES -->|"assets, usage"| AS[Asset]
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  classDef contract fill:#f2efe6,stroke:#7a6a3f,stroke-width:2px;
+  class TR seam;
+  class REQ,WIRE,RES,AS contract;

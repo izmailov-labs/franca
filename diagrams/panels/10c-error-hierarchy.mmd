@@ -1,0 +1,45 @@
+classDiagram
+    note "core/errors.py. Every wrapped ValidationError goes through format_validation: path and message, never the input value."
+
+    class FrancaError
+    class ModelError {
+        message: str
+        status: int | None
+        provider: Provider
+        retryable: bool
+        failure_class: FailureClass
+        raw: Mapping[str, Any] | None
+        retry_after_s: float | None
+        FailureClass: transport|auth|rate_limit|provider|parse
+        FailureClass: timeout|selection|unsupported|request|lint
+    }
+    class SelectionError {
+        reasons: tuple[str, ...]
+        status = None
+        failure_class = selection
+    }
+    class JobTimeoutError {
+        status = 408
+        failure_class = timeout
+        retryable = False
+    }
+    class JobFailedError {
+        status = 422
+        failure_class = provider
+        retryable = False
+    }
+    class LintError {
+        findings: tuple[Finding, ...]
+    }
+    class ProfileError
+    class ConfigError
+    class PluginConflictError
+
+    FrancaError <|-- ModelError
+    FrancaError <|-- LintError
+    FrancaError <|-- ProfileError
+    FrancaError <|-- ConfigError
+    ConfigError <|-- PluginConflictError
+    ModelError <|-- SelectionError
+    ModelError <|-- JobTimeoutError
+    ModelError <|-- JobFailedError

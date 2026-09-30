@@ -1,0 +1,153 @@
+classDiagram
+    note "Q8 version-bump-protected: PromptPackage, ModelResponse, Delta, CallTrace. All frozen pydantic models."
+
+    class PromptPackage {
+        provider: Provider | None
+        dialect: Dialect | None
+        model: str | None
+        system: tuple[SystemBlock, ...]
+        items: tuple[Item, ...]
+        tools: tuple[ToolDef, ...]
+        reasoning: Reasoning
+        output_format: OutputFormat
+        max_output_tokens: int | None
+        sampling: dict[str, float | int]
+        cache_hints: dict[str, Any]
+        state_mode: StateMode
+        continuation: str | None
+        meta: PackageMeta
+        provider_options: dict[Dialect, dict[str, Any]]
+        system_text() str
+        last_item() Item | None
+    }
+
+    class Item {
+        role: system|developer|user|assistant|model|tool
+        kind: text|image|tool_call|tool_result|reasoning|other
+        text: str | None
+        name: str | None
+        call_id: str | None
+        args: dict[str, Any] | None
+        asset: Asset | None
+        server_side: bool
+        artifact: dict[str, Any] | None
+    }
+
+    class SystemBlock {
+        text: str
+        position: int = 0
+    }
+
+    class ToolDef {
+        name: str
+        parameters: dict[str, Any]
+        description: str
+        strict: bool | None
+        server_side: bool
+    }
+
+    class Reasoning {
+        mode: adaptive|enabled|disabled|level
+        effort: str | None
+        budget_tokens: int | None
+        artifact_present: bool
+    }
+
+    class OutputFormat {
+        kind: text|json
+        json_schema: dict[str, Any] | None
+        strict: bool | None
+        strategy: Strategy | None
+    }
+
+    class Asset {
+        kind: image|video|audio|file
+        url: str | None
+        b64: str | None
+        file_id: str | None
+        mime: str | None
+        meta: dict[str, Any]
+    }
+
+    class Traced {
+        trace: CallTrace | None
+        with_trace(trace: CallTrace) Self
+    }
+
+    class ModelResponse {
+        model: str
+        provider: Provider
+        dialect: Dialect
+        items: tuple[Item, ...]
+        stop_reason: str | None
+        usage: Usage
+        refusal: Refusal | None
+        served_model: str | None
+        continuation: str | None
+        structured: dict[str, Any] | None
+        text() str
+        tool_calls() tuple[Item, ...]
+    }
+
+    class Delta {
+        kind: block_start|text|reasoning|tool_call|block_end|usage|finish
+        index: int | None
+        text: str
+        name: str | None
+        call_id: str | None
+        args_json: str
+        usage: Usage | None
+        stop_reason: str | None
+    }
+
+    class Refusal {
+        category: str | None
+        explanation: str | None
+    }
+
+    class Usage {
+        input_tokens: int = 0
+        output_tokens: int = 0
+        cache_read_tokens: int = 0
+        cache_write_tokens: int = 0
+        __add__(other: Usage) Usage
+    }
+
+    class CallTrace {
+        endpoint_id: str
+        dialect: Dialect
+        selection_via: SelectionVia
+        unverified: frozenset[str]
+        latency_ms: float
+        ttft_ms: float | None
+        attempts: int
+        tool_rounds: int
+        tool_calls: int
+        partial: bool
+    }
+
+    class Job {
+        id: str
+        status: JobStatus
+        progress: float | None
+        error: str | None
+        raw: dict[str, Any]
+        finished() bool
+    }
+
+    PromptPackage *-- SystemBlock : system
+    PromptPackage *-- Item : items
+    PromptPackage *-- ToolDef : tools
+    PromptPackage *-- Reasoning : reasoning
+    PromptPackage *-- OutputFormat : output_format
+    Item *-- Asset : asset
+
+    Traced <|-- ModelResponse
+    Traced <|-- Delta
+    Traced *-- CallTrace : trace
+    ModelResponse *-- Item : items
+    ModelResponse *-- Usage : usage
+    ModelResponse *-- Refusal : refusal
+    Delta *-- Usage : usage
+
+    Job ..> Asset : assets from job.raw

@@ -1,0 +1,67 @@
+# --- Secrets -----------------------------------------------------------
+# An eval framework runs against provider APIs; keep keys out of the repo.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.toml
+
+# --- Python ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- Builds ------------------------------------------------------------
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+
+# --- Environments ------------------------------------------------------
+.venv/
+.venv*/
+venv/
+env/
+.direnv/
+
+# --- Tooling caches ----------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.nox/
+.tox/
+.cache/
+.hypothesis/
+.ipynb_checkpoints/
+
+# --- Coverage ----------------------------------------------------------
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- Docs ---------------------------------------------------------------
+# .gitignore has no inline comments - each pattern gets its own line.
+# mkdocs build output
+site/
+# internal working notes; also excluded from the built site via mkdocs exclude_docs
+docs/research/
+
+# --- Logs / scratch ----------------------------------------------------
+*.log
+*.orig
+*.rej
+scratch/
+tmp/
+
+# --- Editors / OS ------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,37 @@
+graph TD
+  subgraph PREC["Precedence: kwargs then environment then TOML then defaults"]
+    KW["overrides=<br/>kwargs"]
+    ENV["env=<br/>FRANCA_* vars"]
+    FILE["file=<br/>franca.toml"]
+    DEF["defaults"]
+  end
+
+  KW -->|"1 wins"| LOAD
+  ENV -->|2| LOAD
+  FILE -->|"3 FRANCA_CONFIG"| LOAD
+  DEF -->|4| LOAD
+
+  LOAD(["load_settings()"]) -->|"one model_validate<br/>else ConfigError"| SET["Settings"]
+  SET --> HOLD["ProviderSettings<br/>RoutePolicy"]
+  HOLD -.->|"route_for(spec)"| REG
+  SET -->|"settings="| REG["ModelRegistry"]
+
+  subgraph SEAMS["Injectable seams (constructor args)"]
+    TRN(["Transport"])
+    CLK(["Clock"])
+    TRC(["Tracer"])
+    KEY(["KeyProvider"])
+  end
+
+  TRN -.->|"transport=<br/>else settings.transport"| REG
+  CLK -.->|"clock=<br/>else AsyncioClock"| REG
+  TRC -.->|"tracer=<br/>else NullTracer"| REG
+  KEY -.->|"keys=<br/>else SettingsKeyProvider"| REG
+
+  REG -->|"override()"| COPY["test copy<br/>fresh _state"]
+
+  DISC(["discover_plugins()<br/>entry points: franca.plugins"]) -->|"sorted, ConfigError on load"| RGR["Registrar"]
+  RGR -->|"BUILTINS then plugins<br/>registrar.finalize()"| REG
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  class TRN,CLK,TRC,KEY seam;

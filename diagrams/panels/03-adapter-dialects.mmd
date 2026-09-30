@@ -1,0 +1,33 @@
+graph TD
+  ADP["Adapter (ABC) - M0<br/>to_request, from_response, error_from"]
+  SA["StreamingAdapter<br/>adds from_stream"]
+  JA["JobAdapter (ABC) - M8<br/>to_submit, job_from_submit, poll_request<br/>job_from_poll, result"]
+  WR(["WireRequest - M0<br/>path, body, stream, unverified"])
+  DA["DialectAdapter<br/>request_cls, supports, merges_same_role"]
+  CM{{"chat/dialects/common.py<br/>gate_sampling, output_budget<br/>pick_strategy, thinking_config"}}
+
+  subgraph FIVE["chat/dialects - the five adapters"]
+    AN["AnthropicMessagesAdapter<br/>M0 / M3"]
+    OC["OpenAIChatAdapter<br/>M4"]
+    ORS["OpenAIResponsesAdapter<br/>M4"]
+    GG["GoogleGenerateContentAdapter<br/>M5"]
+    GI["GoogleInteractionsAdapter<br/>M5"]
+  end
+
+  ADP -->|"to_request() returns"| WR
+  ADP -->|"same Req, Res plus Delta"| SA
+  ADP -.->|"same ClassVars, all five abstract"| JA
+  JA -.->|"to_submit / poll_request return"| WR
+  SA -->|"bound to PromptPackage, ModelResponse, Delta"| DA
+  CM -.->|"helpers add to unverified"| DA
+  DA -->|"body() then merge_provider_options<br/>then request_cls.model_validate"| WR
+  DA -->|"implement body() and path()"| AN
+  DA --> OC
+  DA --> ORS
+  DA --> GG
+  DA --> GI
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  classDef leaf fill:#f4ece0,stroke:#a2662a,stroke-width:2px;
+  class ADP,SA,JA,DA seam;
+  class AN,OC,ORS,GG,GI leaf;

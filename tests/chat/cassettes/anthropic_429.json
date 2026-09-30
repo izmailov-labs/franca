@@ -1,0 +1,15 @@
+{
+  "exchanges": [
+    {
+      "method": "POST",
+      "url": "https://api.anthropic.com/v1/messages",
+      "request": "{\"max_tokens\":64,\"messages\":[{\"content\":[{\"text\":\"Say hi in three words.\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"claude-opus-4-5\",\"system\":\"You are terse.\"}",
+      "status": 429,
+      "headers": {
+        "content-type": "application/json",
+        "Retry-After": "30"
+      },
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Number of requests has exceeded your rate limit.\"}}"
+    }
+  ]
+}

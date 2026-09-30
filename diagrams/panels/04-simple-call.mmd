@@ -1,0 +1,47 @@
+graph TD
+  PKG[PromptPackage]
+
+  subgraph MODELG["chat/model.py + core/model.py"]
+    COMPLETE["ChatModel.complete"]
+    PREP[ChatModel.prepare]
+    BUILD[ChatModel.build]
+  end
+
+  subgraph ADAPTG["chat/adapter.py + core/adapter.py"]
+    TOREQ([adapter.to_request])
+    WIRE[WireRequest]
+    FROMRES([adapter.from_response])
+  end
+
+  subgraph CONNG["core/connector.py + core/transport.py"]
+    SEND[Connector.send]
+    POST([Transport.post])
+    RAW[RawResponse]
+  end
+
+  CLK{{Clock}}
+  RES[ModelResponse]
+  USAGE[Usage]
+  TRACE[CallTrace]
+  ERR[ModelError]
+
+  PKG --> COMPLETE
+  COMPLETE -->|"fill provider/dialect/model, retired check"| PREP
+  PREP -->|"re-derive needs vs selection, never re-select"| BUILD
+  BUILD -->|"pkg, model, profile, stream=False"| TOREQ
+  TOREQ -->|"provider_options merged LAST, then validated"| WIRE
+  WIRE -->|"body or content"| SEND
+  SEND -->|"sorted-key JSON, auth header"| POST
+  POST -->|"bytes"| RAW
+  RAW -->|"RawResponse.status"| SEND
+  SEND -->|"status map to ModelError, else raw dict"| FROMRES
+  SEND -.->|"see 02"| ERR
+  FROMRES -->|"leaf stamps trace: res.with_trace(...)"| RES
+  CLK -.->|"monotonic() at t0 and after"| TRACE
+  RES -.->|"usage"| USAGE
+  RES -.->|"trace"| TRACE
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  classDef contract fill:#f2efe6,stroke:#7a6a3f,stroke-width:2px;
+  class CLK seam;
+  class PKG,WIRE,RAW,RES,USAGE,TRACE contract;

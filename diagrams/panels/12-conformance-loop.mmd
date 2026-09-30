@@ -1,0 +1,20 @@
+graph TD
+  CAS[("Cassette<br/>Exchange rows")] -->|"replay: method, url, canonical request"| ST["ScriptedTransport"]
+  RT["RecordingTransport"] -.->|"buffer, scrub, save(path)"| CAS
+  ST -->|"RawResponse / SSE lines as bytes"| ADP(["adapter.to_request<br/>adapter.from_response"])
+
+  PKGS(["packages()"]) -->|"the corpus: tools, reasoning, each Strategy"| ADP
+  ADP -->|"WireRequest body"| GOLD[("golden matrix<br/>tests/golden")]
+  GOLD -.->|"--update-golden rewrites"| GOLD
+  ADP -->|"two builds are byte-equal"| ROUND["round-trip<br/>Request.model_validate"]
+
+  SUITE{{"ConformanceSuite[Req, Res]"}}
+  CHK(["check(gate, when, adapter_flag)"]) -->|"declares one behaviour"| SUITE
+  ADP -->|"one run per dialect"| SUITE
+  PRF["ChatProfile + EndpointFeatures"] -.->|"gate: None, bool, non-bool"| SUITE
+  SUITE --> REP["ConformanceReport"]
+  REP -->|"passed, failed"| OUT["skipped_unsupported<br/>skipped_unverified, todo"]
+  RUN(["run_conformance(registry, spec, cassette_dir)"]) -->|"same runner for plugin authors"| SUITE
+
+  classDef seam fill:#dcebe9,stroke:#0e6e6e,stroke-width:2px;
+  class SUITE seam;

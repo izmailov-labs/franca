@@ -1,0 +1,208 @@
+# franca is a single-package repository: this file is both the package manifest
+# and the one lint, type, test and coverage gate the package is held to. It was
+# extracted from the validia.dev uv workspace, where the same configuration sat
+# on a virtual root and covered several members; here every path is relative to
+# the repository root because the repository root *is* the package.
+
+[project]
+name = "franca"
+version = "0.1.0"
+description = "One request shape for every LLM wire dialect: transports, adapters, streaming, and a model registry."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "izmailov-labs" }]
+keywords = ["llm", "api-client", "adapters", "anthropic", "openai", "gemini", "streaming", "async"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+# pydantic is one of franca's two runtime dependencies, and adding it was a real
+# decision (plan SS11). The stdlib route -- a reflective validator, dict profile rows,
+# a custom Secret -- is Any-heavy code owned forever, and dataclasses validate nothing
+# on the outbound request, so request errors would carry no field path. pydantic gives
+# exclude_unset overlay semantics, extra="allow" with alias generators, SecretStr and
+# Field(exclude=True) in a line each. Every LLM SDK consumers already install depends
+# on pydantic 2, so the inherited weight is near zero.
+#   >=2.12  first release with Python 3.14 support (CI runs 3.14), and the first where
+#           validate_by_name / validate_by_alias are the non-deprecated spelling.
+#   <3      v3 changes defaults.
+#
+# whence is the configuration layer: layered loading from TOML and the environment,
+# with every value keeping the file and line it came from so a bad setting reports
+# `franca.toml:4:9` rather than just a field name. It carries no runtime dependencies
+# of its own, so the inherited weight is the package itself.
+#   >=1.0   the first standalone release, extracted from the same workspace.
+#   <2      a major bump may change the Config / Discovery surface settings.py uses.
+dependencies = ["pydantic>=2.12,<3", "whence>=1.0,<2"]
+
+# httpx is NOT a runtime dependency: `HttpxTransport` imports it inside __init__ and
+# raises ConfigError("pip install 'franca[http]'") when it is absent, so the library
+# installs and every offline path (ScriptedTransport, cassettes) works without it.
+[project.optional-dependencies]
+http = ["httpx>=0.28"]
+
+[project.urls]
+Homepage = "https://github.com/izmailov-labs/franca"
+Repository = "https://github.com/izmailov-labs/franca"
+Changelog = "https://github.com/izmailov-labs/franca/blob/main/CHANGELOG.md"
+Issues = "https://github.com/izmailov-labs/franca/issues"
+
+[build-system]
+requires = ["hatchling>=1.32"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/franca"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/", "tests/", "CHANGELOG.md", "README.md", "LICENSE"]
+
+# PEP 735 dependency groups. These are dev-only and are NOT published to PyPI
+# (unlike [project.optional-dependencies], which consumers would see as extras).
+[dependency-groups]
+dev = [
+  # Not a runtime dependency: httpx is the optional `[http]` extra. It lives here
+  # so mypy strict sees its inline types without a blanket ignore_missing_imports.
+  "httpx>=0.28",
+  "mypy>=2.3.1",
+  "pre-commit>=4.6.2",
+  "pytest>=9.1.1",
+  "pytest-asyncio>=1.4",
+  "pytest-cov>=7.1",
+  # Ruff has no 1.0 and does not follow semver below it: a minor bump can change
+  # which rules fire. Pinned exactly so lint results only change deliberately.
+  "ruff==0.16.6",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+required-version = ">=0.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+# The design plan's Python blocks are deliberately dense sketches, not code. It is
+# gitignored too, but ruff only honours .gitignore inside a git repository.
+# scratch/ is a throwaway sandbox for the editor's run/debug button. It is gitignored
+# too, but ruff only honours .gitignore inside a git repository.
+extend-exclude = ["docs/research", "scratch"]
+
+[tool.ruff.lint]
+# Explicit select, never the defaults: ruff 0.16 grew its default set from 59 to
+# 413 rules, so relying on defaults means upgrades silently redefine the gate.
+select = [
+  "E", "F", "W",      # pycodestyle + pyflakes
+  "I",                # isort
+  "B",                # bugbear
+  "UP",               # pyupgrade
+  "SIM",              # simplify
+  "C4",               # comprehensions
+  "N",                # pep8-naming
+  "PERF",             # performance
+  "RUF",              # ruff-specific
+  "A",                # builtins
+  "RET",              # return
+  "PT",               # pytest style
+  "TID",              # tidy-imports
+  "PIE",              # misc
+  "ASYNC",            # flake8-async — blocking calls in async def, bad sleeps
+  "D",                # pydocstyle — docstrings are the API reference's source material
+  "S",                # bandit
+  "TC",               # type-checking imports
+  "PTH",              # pathlib over os.path
+  "T20",              # no stray print()
+]
+ignore = [
+  "E501",             # line length is the formatter's job, not the linter's
+  "TID252",           # relative imports are fine inside the package
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "S101",             # assert is the point of a test
+  # Docstrings are the API reference's source material, but tests are not published:
+  # module, class, __init__ and dunder docstrings are noise on a test helper.
+  "D100", "D101", "D103", "D105", "D107",
+  "TID251",           # tests may drive asyncio directly; src/ must inject Clock
+  # A test owns its event loop, so blocking file I/O while arranging a
+  # fixture is not the latency bug these rules exist to catch.
+  "ASYNC230", "ASYNC240",
+]
+# The ONLY module in src/ allowed to import asyncio. Everything else injects Clock,
+# which is what keeps franca loop-neutral: a trio user passes TrioClock.
+"src/franca/core/clock.py" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"asyncio".msg = "inject Clock (franca.core.clock) instead; asyncio is allowed only in core/clock.py"
+
+[tool.ruff.lint.flake8-type-checking]
+# pydantic evaluates field annotations at class creation; without this, TC001-TC003
+# move field-type imports behind TYPE_CHECKING and the models fail to build.
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+enable_error_code = [
+  "redundant-expr",
+  "possibly-undefined",
+  "truthy-bool",
+  "ignore-without-code",
+]
+# Deliberately NOT ignore_missing_imports: with near-zero runtime dependencies,
+# a missing stub is real signal rather than noise.
+
+[tool.pytest]
+minversion = "9.1"
+# Arrays, not whitespace-separated strings — this is the native pytest 9 table,
+# not the legacy string-typed [tool.pytest.ini_options].
+addopts = [
+  "-ra", "--strict-markers", "--strict-config", "--import-mode=importlib",
+  # Live provider calls and the aimock suite are opt-in: `make test-contract` and
+  # `make test-mock` (or -m contract / -m mock) select them.
+  "-m", "not contract and not mock",
+]
+markers = [
+  "contract: live provider call; needs keys",
+  "mock: drives the aimock mock server; spawned via npx unless AIMOCK_BASE_URL is set",
+]
+testpaths = ["tests"]
+# importlib import mode leaves sys.path alone, so the suite exercises the
+# installed package rather than the source tree next to it.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 90
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@overload",
+]
