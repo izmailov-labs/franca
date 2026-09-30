@@ -59,6 +59,22 @@ question and the one the profile table answers. A measured row is not permission
 model — it is a record of what that model accepts on the wire, so franca can refuse an
 illegal parameter locally, with a field path, instead of paying a round trip to find out.
 
+Some of what that reaches, as each provider's own docs listed it on 2026-09-30. franca
+gates on none of this — the list is here for orientation, and the provider's page is the
+authority:
+
+| Provider | Current text models | Provider's list |
+| --- | --- | --- |
+| `anthropic` | `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-4-5` | [models](https://platform.claude.com/docs/en/about-claude/models/overview) |
+| `openai` | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` | [models](https://developers.openai.com/api/docs/models) |
+| `google` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.5-flash-lite` | [models](https://ai.google.dev/gemini-api/docs/models) |
+| `xai` | `grok-4.7`, `grok-4.6`, `grok-4.3`, `grok-build-0.1` | [models](https://docs.x.ai/docs/models) |
+| `deepseek` | `deepseek-v4-pro`, `deepseek-flash` | [pricing](https://api-docs.deepseek.com/quick_start/pricing) |
+
+That table is a snapshot and will rot — three of those five lineups changed in the two
+weeks before it was written. Nothing in franca reads it, which is the point: a new model
+id works the day the provider ships it, with no release here.
+
 A model id is normalised before it is matched, so every spelling of one model lands on one
 row. An `anthropic.` / `openai.` / `google.` vendor namespace is stripped, as are the `[1m]`
 context marker, an `@YYYYMMDD` or `-YYYYMMDD` snapshot date and `-latest`; the longest
@@ -94,6 +110,61 @@ One genuine coverage limit, as distinct from an unmeasured one: three of the fiv
 chat dialects are implemented. `openai_responses` and `google_interactions` have ids
 reserved in `core/ids.py` but no adapter yet, so OpenAI models are reachable through Chat
 Completions rather than `/v1/responses`.
+
+## One request, three wires
+
+This is the whole claim, so here it is concretely. One `PromptPackage` — a system block, a
+user turn, a 32-token budget — rendered by each adapter. The bodies below are printed from
+the adapters, not written by hand:
+
+```json
+// anthropic_messages                POST /v1/messages
+{
+  "model": "claude-sonnet-5",
+  "max_tokens": 32,
+  "messages": [{"role": "user", "content": [{"type": "text", "text": "Name one primary colour."}]}],
+  "system": "You are terse."
+}
+
+// openai_chat                       POST /v1/chat/completions
+{
+  "model": "gpt-6-astra",
+  "messages": [
+    {"role": "system", "content": "You are terse."},
+    {"role": "user", "content": "Name one primary colour."}
+  ],
+  "max_completion_tokens": 32
+}
+
+// google_generate_content           POST /v1beta/models/gemini-3.8-flash:generateContent
+{
+  "contents": [{"role": "user", "parts": [{"text": "Name one primary colour."}]}],
+  "generationConfig": {"maxOutputTokens": 32},
+  "systemInstruction": {"parts": [{"text": "You are terse."}]}
+}
+```
+
+Three disagreements in four lines of input. The system prompt is a top-level string, a
+message with a `system` role, and a `systemInstruction.parts` array. The output budget is
+`max_tokens`, `max_completion_tokens` and `generationConfig.maxOutputTokens`. And the model
+id rides in the body twice but in the *path* for Google, which is why that row's `path` is
+a collection and the adapter sets `WireRequest.path` itself.
+
+The answers converge again on the way back. The same two calls over real HTTP, against
+[aimock](https://aimock.copilotkit.dev):
+
+```text
+anthropic_messages   items=[('assistant', 'text', 'Blue.')]  text='Blue.'
+                     stop_reason='end_turn'  usage: in=17 out=5 cache_read=0 cache_write=0
+openai_chat          items=[('assistant', 'text', 'Blue.')]  text='Blue.'
+                     stop_reason='stop'      usage: in=17 out=5 cache_read=0 cache_write=0
+```
+
+Identical `items`, identical `usage` field names, `dialect` recording which wire answered,
+and the untranslated payload still on `raw` — `content`/`stop_reason` for one,
+`choices`/`usage` for the other. `stop_reason` is deliberately *not* unified: it stays in
+the wire's own words, because flattening `end_turn` and `stop` into one enum would throw
+away the distinction the day a provider adds a reason franca has never seen.
 
 ## Install
 
