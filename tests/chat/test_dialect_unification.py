@@ -17,7 +17,8 @@ asserting it offline would mean inventing provider payloads, and an invented pay
 tests the fixture rather than the wire.
 """
 
-from typing import Final, NamedTuple
+from collections.abc import Mapping
+from typing import Any, Final, NamedTuple
 
 import pytest
 
@@ -25,8 +26,9 @@ from franca.chat.adapter import DialectAdapter
 from franca.chat.dialects.anthropic_messages import AnthropicMessagesAdapter
 from franca.chat.dialects.google_generate_content import GoogleGenerateContentAdapter
 from franca.chat.dialects.openai_chat import OpenAIChatAdapter
-from franca.chat.ir import Item, PromptPackage, SystemBlock
+from franca.chat.ir import Item, OutputFormat, PromptPackage, SystemBlock
 from franca.chat.profile import ChatProfile
+from franca.core.enums import Strategy
 from franca.core.ids import ANTHROPIC, GOOGLE, OPENAI, Provider
 
 SYSTEM_TEXT: Final = "You are terse."
@@ -140,3 +142,60 @@ def test_no_two_dialects_render_the_same_body() -> None:
     bodies = [repr(_render(case)) for case in CASES]
 
     assert len(set(bodies)) == len(CASES)
+
+
+# ------------------------------------------------------------------ structured output
+
+SCHEMA: Final[dict[str, Any]] = {
+    "title": "Colour",
+    "type": "object",
+    "properties": {"colour": {"type": "string"}},
+    "required": ["colour"],
+    "additionalProperties": False,
+}
+
+STRUCTURED: Final = PACKAGE.model_copy(
+    update={"output_format": OutputFormat(kind="json", json_schema=SCHEMA)}
+)
+
+NATIVE_PATH: Final[dict[str, tuple[str, ...]]] = {
+    "anthropic_messages": ("output_config", "format", "schema"),
+    "openai_chat": ("response_format", "json_schema", "schema"),
+    "google_generate_content": ("generationConfig", "responseJsonSchema"),
+}
+"""Where each wire carries a native schema: three places, three spellings."""
+
+
+def _dig(body: Mapping[str, Any], path: tuple[str, ...]) -> object:
+    node: object = body
+    for key in path:
+        assert isinstance(node, Mapping), f"{key!r} is not under an object"
+        node = node[key]
+    return node
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+def test_every_dialect_sends_the_schema_natively_and_says_it_assumed_so(case: Case) -> None:
+    """The schema reaches every wire, in each wire's own place.
+
+    The silent drop this guards against was real: before structured output landed,
+    every adapter accepted `output_format` and sent nothing for it.
+    """
+    profile = ChatProfile(provider=case.provider, model_prefix="")
+    wire = case.adapter.to_request(STRUCTURED, case.model, profile)
+
+    assert wire.body is not None
+    assert _dig(wire.body, NATIVE_PATH[case.dialect]) == SCHEMA
+    assert wire.unverified == {"structured_output"}, "an empty profile measured no route"
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+def test_a_profile_preference_moves_every_dialect_to_the_forced_tool(case: Case) -> None:
+    profile = ChatProfile(
+        provider=case.provider, model_prefix="", structured_output=Strategy.tool_calling
+    )
+    wire = case.adapter.to_request(STRUCTURED, case.model, profile)
+
+    assert wire.body is not None
+    assert "Colour" in repr(wire.body.get("tools")), "the tool is named after the schema"
+    assert wire.unverified == frozenset()

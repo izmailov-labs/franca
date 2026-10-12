@@ -41,11 +41,12 @@ from franca.chat.endpoints import (
     OPENAI_CHAT_ENDPOINT,
     XAI_CHAT_ENDPOINT,
 )
-from franca.chat.ir import Item, ModelResponse, PromptPackage, SystemBlock
+from franca.chat.ir import Item, ModelResponse, OutputFormat, PromptPackage, SystemBlock
 from franca.chat.model import ChatModel
 from franca.chat.profile import ChatProfile
 from franca.core.clock import AsyncioClock
 from franca.core.connector import Connector
+from franca.core.enums import Strategy
 from franca.core.errors import ModelError
 from franca.core.ids import ANTHROPIC, DEEPSEEK, GOOGLE, OPENAI, XAI
 from franca.core.keys import StaticKeyProvider
@@ -393,6 +394,59 @@ async def test_a_tool_call_reply_is_kept_on_raw_until_the_ir_can_carry_it(
     assert res.items == ()
     assert res.stop_reason == case.tool_stop_reason
     assert case.tool_name(res.raw) == "get_weather"
+
+
+# ---------------------------------------------------------------- structured output
+
+COLOUR_SCHEMA: dict[str, Any] = {
+    "title": "Colour",
+    "type": "object",
+    "properties": {"colour": {"type": "string"}},
+    "required": ["colour"],
+    "additionalProperties": False,
+}
+
+
+def _ask_for_json(text: str, **fmt: Any) -> PromptPackage:
+    return _ask(text).model_copy(
+        update={"output_format": OutputFormat(kind="json", json_schema=COLOUR_SCHEMA, **fmt)}
+    )
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+async def test_a_structured_answer_decodes_on_every_wire(
+    case: MockCase, aimock_url: str, aimock_key: str, transport: HttpxTransport
+) -> None:
+    """The response half of structured output, over real HTTP, on all five rows.
+
+    aimock answers from the fixture whatever the request asked for, so this cannot
+    prove the provider would honour the schema -- that is the contract suite's job. It
+    does prove the parse: the JSON the wire carries as text becomes `structured`, and
+    the assumption the adapter made travels to the trace.
+    """
+    model = _model(case, aimock_url, aimock_key, transport)
+
+    res = await model.complete(_ask_for_json("Name one primary colour as JSON."))
+
+    assert res.structured == {"colour": "blue"}
+    assert res.text == '{"colour":"blue"}'
+    assert res.trace is not None
+    assert res.trace.unverified == {"structured_output"}
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+async def test_a_forced_tool_answer_decodes_on_every_wire(
+    case: MockCase, aimock_url: str, aimock_key: str, transport: HttpxTransport
+) -> None:
+    """Three wires put the forced call in three places, and one as a JSON string."""
+    model = _model(case, aimock_url, aimock_key, transport)
+    pkg = _ask_for_json("Name one primary colour through a tool.", strategy=Strategy.tool_calling)
+
+    res = await model.complete(pkg)
+
+    assert res.structured == {"colour": "blue"}
+    assert res.items == (), "the call itself is not an item until the IR carries tools"
+    assert res.stop_reason == case.tool_stop_reason
 
 
 # ----------------------------------------------------------------------- streaming

@@ -1,0 +1,15 @@
+{
+  "exchanges": [
+    {
+      "method": "POST",
+      "url": "https://api.anthropic.com/v1/messages",
+      "request": "{\"max_tokens\":64,\"messages\":[{\"content\":[{\"text\":\"Name one primary colour.\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"claude-opus-4-5\",\"output_config\":{\"format\":{\"schema\":{\"additionalProperties\":false,\"properties\":{\"colour\":{\"type\":\"string\"}},\"required\":[\"colour\"],\"title\":\"Colour\",\"type\":\"object\"},\"type\":\"json_schema\"}},\"system\":\"You are terse.\"}",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json",
+        "request-id": "req_011CQhandwrittenSO"
+      },
+      "body": "{\"id\":\"msg_011CQhandwrittenSO\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-5-20251101\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"colour\\\":\\\"blue\\\"}\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":181,\"output_tokens\":8,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}"
+    }
+  ]
+}

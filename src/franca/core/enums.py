@@ -29,7 +29,12 @@ class AuthScheme(StrEnum):
 
 
 class Strategy(StrEnum):
-    """How structured output is obtained when a model lacks native support."""
+    """How structured output is obtained on the wire. One member per branch in each adapter.
+
+    `native` is the wire's own schema field, `tool_calling` forces a call to one
+    synthesised tool whose parameters are the schema, and `json_mode` asks only for
+    well-formed JSON, sending no schema at all.
+    """
 
     native = "native"
     tool_calling = "tool_calling"

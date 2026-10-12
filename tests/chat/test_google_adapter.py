@@ -23,8 +23,9 @@ from franca.chat.dialects.google_generate_content import (
     GoogleGenerateContentAdapter,
     path_for,
 )
-from franca.chat.ir import Item, PromptPackage, SystemBlock
+from franca.chat.ir import Item, OutputFormat, PromptPackage, SystemBlock
 from franca.chat.profile import ChatProfile
+from franca.core.enums import Strategy
 from franca.core.errors import ModelError
 from franca.core.ids import GOOGLE, GOOGLE_GENERATE_CONTENT
 
@@ -408,3 +409,166 @@ def test_an_undecodable_body_is_left_alone() -> None:
 )
 def test_an_error_body_of_the_wrong_shape_never_reclassifies(raw: dict[str, Any]) -> None:
     assert _adapter().error_from(400, raw, GOOGLE) is None
+
+
+# ---------------------------------------------------------------- structured output
+
+SCHEMA: dict[str, Any] = {
+    "title": "Colour",
+    "type": "object",
+    "properties": {"colour": {"type": "string"}},
+    "required": ["colour"],
+}
+
+CONTENTS: list[dict[str, Any]] = [{"role": "user", "parts": [{"text": "hi"}]}]
+
+
+def _structured(**fmt: Any) -> PromptPackage:
+    return PromptPackage(
+        items=(Item(role="user", kind="text", text="hi"),),
+        max_output_tokens=64,
+        output_format=OutputFormat(kind="json", **fmt),
+    )
+
+
+def _body(pkg: PromptPackage) -> dict[str, Any]:
+    body = _adapter().to_request(pkg, MODEL, PROFILE).body
+    assert body is not None
+    return body
+
+
+def test_every_strategy_has_a_field_on_this_wire() -> None:
+    assert GoogleGenerateContentAdapter.supports == frozenset(Strategy)
+
+
+def test_a_schema_renders_natively_beside_the_budget_as_json_schema() -> None:
+    """`responseJsonSchema` takes the schema as written; `responseSchema` would not."""
+    wire = _adapter().to_request(_structured(json_schema=SCHEMA), MODEL, PROFILE)
+
+    assert wire.body == {
+        "contents": CONTENTS,
+        "generationConfig": {
+            "maxOutputTokens": 64,
+            "responseMimeType": "application/json",
+            "responseJsonSchema": SCHEMA,
+        },
+    }
+    assert wire.unverified == {"structured_output"}
+
+
+def test_strict_has_no_knob_on_this_wire_and_is_not_sent() -> None:
+    assert _body(_structured(json_schema=SCHEMA, strict=True)) == _body(
+        _structured(json_schema=SCHEMA)
+    )
+
+
+def test_json_mode_is_the_mime_type_alone() -> None:
+    body = _body(_structured(json_schema=SCHEMA, strategy=Strategy.json_mode))
+
+    assert body["generationConfig"] == {
+        "maxOutputTokens": 64,
+        "responseMimeType": "application/json",
+    }
+
+
+def test_json_without_a_schema_takes_json_mode() -> None:
+    assert "responseJsonSchema" not in _body(_structured())["generationConfig"]
+
+
+def test_tool_calling_forces_one_declared_function_named_after_the_schema() -> None:
+    body = _body(_structured(json_schema=SCHEMA, strategy=Strategy.tool_calling))
+
+    assert body == {
+        "contents": CONTENTS,
+        "generationConfig": {"maxOutputTokens": 64},
+        "tools": [
+            {
+                "functionDeclarations": [
+                    {
+                        "name": "Colour",
+                        "description": "Return the answer in the requested structure.",
+                        "parametersJsonSchema": SCHEMA,
+                    }
+                ]
+            }
+        ],
+        "toolConfig": {
+            "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["Colour"]}
+        },
+    }
+
+
+def test_the_forced_tool_takes_the_schemas_own_description_when_it_has_one() -> None:
+    """The reference lists a declaration's `description` as required on this wire."""
+    schema = {**SCHEMA, "description": "A primary colour."}
+    body = _body(_structured(json_schema=schema, strategy=Strategy.tool_calling))
+
+    assert body["tools"][0]["functionDeclarations"][0]["description"] == "A primary colour."
+
+
+def test_a_sampling_override_keeps_the_schema_and_the_budget() -> None:
+    """The bug a shallow merge would have: `generationConfig` replaced wholesale."""
+    pkg = PromptPackage(
+        items=(Item(role="user", kind="text", text="hi"),),
+        max_output_tokens=64,
+        output_format=OutputFormat(kind="json", json_schema=SCHEMA),
+        provider_options={GOOGLE_GENERATE_CONTENT: {"generationConfig": {"temperature": 0.2}}},
+    )
+
+    assert _body(pkg)["generationConfig"] == {
+        "maxOutputTokens": 64,
+        "responseMimeType": "application/json",
+        "responseJsonSchema": SCHEMA,
+        "temperature": 0.2,
+    }
+
+
+def test_a_native_answer_is_decoded_from_the_joined_text_parts() -> None:
+    """Thought parts are excluded before the join, so reasoning never corrupts the JSON."""
+    raw = {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"text": "Considering colours.", "thought": True},
+                        {"text": '{"colour": '},
+                        {"text": '"blue"}'},
+                    ],
+                },
+                "finishReason": "STOP",
+            }
+        ]
+    }
+    res = _adapter().from_response(raw, _structured(json_schema=SCHEMA), MODEL, GOOGLE)
+
+    assert res.structured == {"colour": "blue"}
+
+
+def test_a_tool_calling_answer_is_the_function_calls_args() -> None:
+    raw = {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        "not an object",
+                        {"functionCall": "not an object either"},
+                        {"functionCall": {"name": "Colour", "args": {"colour": "blue"}}},
+                    ],
+                },
+                "finishReason": "STOP",
+            }
+        ]
+    }
+    pkg = _structured(json_schema=SCHEMA, strategy=Strategy.tool_calling)
+    res = _adapter().from_response(raw, pkg, MODEL, GOOGLE)
+
+    assert res.structured == {"colour": "blue"}
+    assert res.items == ()
+
+
+def test_a_reply_with_no_candidates_has_no_structured_answer() -> None:
+    res = _adapter().from_response({}, _structured(json_schema=SCHEMA), MODEL, GOOGLE)
+
+    assert res.structured is None

@@ -32,9 +32,9 @@ version change, since adapters, cassettes and persisted transcripts are all keye
 these names.
 """
 
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, InstanceOf
+from pydantic import BaseModel, Field, InstanceOf, model_validator
 
 from franca.core.enums import StateMode, Strategy
 from franca.core.ids import Dialect, Provider
@@ -148,24 +148,76 @@ class OutputFormat(BaseModel, frozen=True, extra="forbid"):
     """What shape the answer must take, and how that is to be obtained.
 
     `strategy` is the interesting field: the same JSON Schema is enforced natively by
-    one model, through a forced tool call by another, and by a JSON mode plus a
-    prefill by a third. The caller states the schema once; the profile decides which
-    route a given model can actually take.
+    one model, through a forced tool call by another, and only as well-formed JSON by
+    a third. The caller states the schema once; the adapter and the profile decide
+    which route a given model can actually take.
+
+    A contradictory format is rejected when it is built, not when it is sent. Every
+    rule below is a fact about the format alone, true on every wire, and each one
+    closes a way for a schema to be accepted here and then reach no wire at all:
+
+    * `json_schema`, `strict` and `strategy` describe a JSON answer, so they need
+      `kind="json"`. A schema set without it would otherwise be ignored.
+    * The root of `json_schema` must be an object when it names a type, because
+      `ModelResponse.structured` is a dict.
+    * `native` and `tool_calling` enforce a schema, so they need one.
+    * `strict=True` needs a schema to enforce, and cannot be met by `json_mode`, which
+      guarantees well-formed JSON and nothing about its shape.
 
     Attributes:
         kind: `"text"` for prose, `"json"` for a structured answer. `None` leaves the
-            provider's default alone.
-        json_schema: The schema the answer must satisfy when `kind` is `"json"`.
-        strict: Whether the schema is to be enforced rather than merely suggested;
-            `None` defers to the profile.
+            provider's default alone, and so does `"text"`, which is every wire's
+            default.
+        json_schema: The JSON Schema the answer must satisfy when `kind` is `"json"`.
+            `None` asks for any JSON object. A string `title` that is a valid name on
+            every wire names the schema or the forced tool; anything else is sent as
+            `response`.
+        strict: Whether the schema is to be enforced rather than merely suggested.
+            `None` sends no strict flag at all, leaving the provider's default.
         strategy: How the schema is enforced. `None` lets the adapter pick the best
-            route the profile allows.
+            route the profile allows; an explicit choice is never substituted, and a
+            wire that cannot honour it raises.
     """
 
     kind: Literal["text", "json"] | None = None
     json_schema: dict[str, Any] | None = None
     strict: bool | None = None
     strategy: Strategy | None = None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        """Reject a format whose fields contradict each other; see the class docstring.
+
+        Returns:
+            The format, unchanged.
+
+        Raises:
+            ValueError: Naming the contradiction. pydantic wraps it in a
+                `ValidationError`.
+        """
+        if self.kind != "json":
+            if (self.json_schema, self.strict, self.strategy) != (None, None, None):
+                raise ValueError(
+                    "json_schema, strict and strategy describe a JSON answer;"
+                    " set kind='json' to ask for one"
+                )
+            return self
+        if self.json_schema is not None and self.json_schema.get("type", "object") != "object":
+            raise ValueError(
+                "the root of json_schema must be an object, because"
+                " ModelResponse.structured is a dict"
+            )
+        if self.json_schema is None:
+            if self.strategy in (Strategy.native, Strategy.tool_calling):
+                raise ValueError(f"strategy={self.strategy.value} enforces a json_schema; pass one")
+            if self.strict is True:
+                raise ValueError("strict=True needs a json_schema to enforce")
+        if self.strict is True and self.strategy is Strategy.json_mode:
+            raise ValueError(
+                "json_mode guarantees well-formed JSON, not a schema;"
+                " strict=True needs native or tool_calling"
+            )
+        return self
 
 
 class PackageMeta(BaseModel, frozen=True, extra="forbid"):
@@ -347,7 +399,11 @@ class ModelResponse(Traced, frozen=True):
             next request's `continuation`.
         structured: The decoded structured answer, when one was asked for: the parsed
             text for a native or JSON-mode strategy, the forced tool's arguments for
-            the tool-calling one.
+            the tool-calling one. `None` when no JSON answer was asked for, and also
+            when one was but the reply is not a JSON object -- truncated by the output
+            budget, say, or a refusal in prose. A reply that already arrived is never
+            turned into an exception; `stop_reason` and `text` say what happened.
+            Nothing here validates the value against the schema.
         raw: The decoded provider payload. Kept for debugging and excluded from both
             `model_dump()` and `repr()`, so a persisted transcript never silently
             grows a vendor envelope.

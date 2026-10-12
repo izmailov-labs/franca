@@ -23,14 +23,29 @@ current name. A caller who needs the legacy key for an old deployment can put it
 not, and both arrive as HTTP 429. The status alone is therefore not enough to decide
 retryability, which is exactly what `error_from` exists to refine -- see its docstring
 for the captured evidence.
+
+Structured output is where this wire is the most complete of the three: all three
+strategies have a field. `native` is `response_format` of type `json_schema`, which
+names the schema and carries `strict`; `json_mode` is `response_format` of type
+`json_object`, which sends no schema; `tool_calling` is one function forced through
+`tool_choice`, whose arguments come back as a JSON-encoded *string*, not an object.
+JSON mode also needs the word "JSON" somewhere in the messages, and the provider, not
+franca, enforces that -- this adapter does not edit the prompt to satisfy it.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
-from franca.chat.ir import Item, ModelResponse, PromptPackage
+from franca.chat.dialects.common import (
+    merge_provider_options,
+    pick_strategy,
+    read_structured,
+    schema_name,
+)
+from franca.chat.ir import Item, ModelResponse, OutputFormat, PromptPackage
 from franca.chat.profile import ChatProfile
 from franca.core.adapter import Adapter, WireRequest
+from franca.core.enums import Strategy
 from franca.core.errors import ModelError
 from franca.core.ids import CHAT, OPENAI_CHAT, Provider
 from franca.core.profile import BaseProfile
@@ -119,6 +134,59 @@ def _messages(pkg: PromptPackage, provider: Provider) -> list[dict[str, Any]]:
     return messages
 
 
+def _structured(fmt: OutputFormat, strategy: Strategy) -> dict[str, Any]:
+    """Render the chosen structured-output strategy as top-level body keys.
+
+    `strict` is sent only when the caller set it, in either direction: the wire's own
+    default applies otherwise, and a strict schema here must meet stricter rules
+    (every property required, no additional properties) that franca does not impose
+    on a caller who did not ask for them.
+
+    Args:
+        fmt: The package's output format, already checked by `pick_strategy`.
+        strategy: Any of the three; this wire supports them all.
+
+    Returns:
+        The keys to add to the body.
+    """
+    if strategy is Strategy.json_mode:
+        return {"response_format": {"type": "json_object"}}
+    name = schema_name(fmt)
+    strict = {} if fmt.strict is None else {"strict": fmt.strict}
+    if strategy is Strategy.native:
+        return {
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": name, "schema": fmt.json_schema, **strict},
+            }
+        }
+    return {
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": name, "parameters": fmt.json_schema, **strict},
+            }
+        ],
+        "tool_choice": {"type": "function", "function": {"name": name}},
+    }
+
+
+def _tool_calls(message: Mapping[str, Any]) -> list[tuple[object, object]]:
+    """Read a message's tool calls as `(name, arguments)` pairs, in wire order.
+
+    `arguments` stays the JSON-encoded string the wire sends; `read_structured`
+    decodes it. Anything not shaped like a function call is skipped, since a
+    malformed entry cannot be the forced tool's answer.
+    """
+    calls: Sequence[Any] = message.get("tool_calls") or ()
+    pairs: list[tuple[object, object]] = []
+    for call in calls:
+        function: object = call.get("function") if isinstance(call, Mapping) else None
+        if isinstance(function, Mapping):
+            pairs.append((function.get("name"), function.get("arguments")))
+    return pairs
+
+
 def _error_field(raw: Mapping[str, Any] | None, name: str) -> str | None:
     """Read one string field out of OpenAI's `{"error": {...}}` envelope."""
     if raw is None:
@@ -136,15 +204,22 @@ class OpenAIChatAdapter(Adapter[PromptPackage, ModelResponse]):
     Stateless and cheap to construct, as the `Adapter` contract requires.
 
     What this adapter renders today is text turns, the output budget, the system
-    message and the stream flag; what it reads back is the assistant message, the
-    token meters, `finish_reason` and the model the wire says served the request.
-    Tools, structured output, images, reasoning effort and the Responses API surface
-    are all deferred -- the last of those is a separate dialect, not a flag here.
+    message, the stream flag and structured output; what it reads back is the
+    assistant message, the token meters, `finish_reason`, the model the wire says
+    served the request and the structured answer. Tools, images, reasoning effort and
+    the Responses API surface are all deferred -- the last of those is a separate
+    dialect, not a flag here.
+
+    Attributes:
+        supports: The structured-output strategies this wire can render.
     """
 
     capability = CHAT
     dialect = OPENAI_CHAT
     status = "stable"
+    supports: ClassVar[frozenset[Strategy]] = frozenset(
+        {Strategy.native, Strategy.tool_calling, Strategy.json_mode}
+    )
 
     def to_request(
         self,
@@ -160,8 +235,10 @@ class OpenAIChatAdapter(Adapter[PromptPackage, ModelResponse]):
 
         `stream` is emitted only when streaming was asked for -- an absent key and a
         `false` differ in a cassette diff, and the smaller body is the honest one.
-        `provider_options[openai_chat]` is merged last and validated after, so a
-        caller's override wins over anything computed here.
+        The structured-output keys are added when a JSON answer was asked for; see
+        `pick_strategy` for what that adds to `WireRequest.unverified`.
+        `provider_options[openai_chat]` is merged last and deeply, so a caller's
+        override wins over anything computed here.
 
         Args:
             req: The package to render.
@@ -173,17 +250,22 @@ class OpenAIChatAdapter(Adapter[PromptPackage, ModelResponse]):
             The request for the `Connector` to send.
 
         Raises:
-            ModelError: If an item is outside what this subset can express.
+            ModelError: If an item is outside what this subset can express, or the
+                output format cannot be rendered on this wire.
         """
+        unverified: set[str] = set()
         body: dict[str, Any] = {
             "model": model,
             "messages": _messages(req, profile.provider),
             "max_completion_tokens": _max_tokens(req, profile),
         }
+        strategy = pick_strategy(req.output_format, profile, self.supports, OPENAI_CHAT, unverified)
+        if strategy is not None:
+            body.update(_structured(req.output_format, strategy))
         if stream:
             body["stream"] = True
-        body.update(req.provider_options.get(OPENAI_CHAT, {}))
-        return WireRequest(body=body, stream=stream)
+        body = merge_provider_options(body, req.provider_options.get(OPENAI_CHAT, {}))
+        return WireRequest(body=body, stream=stream, unverified=frozenset(unverified))
 
     def from_response(
         self,
@@ -203,11 +285,16 @@ class OpenAIChatAdapter(Adapter[PromptPackage, ModelResponse]):
         cache counter nested under `prompt_tokens_details` -- which is precisely the
         divergence `Usage` exists to erase for everything upstream.
 
+        When the package asked for a JSON answer, `structured` is the forced
+        function's decoded `arguments` if the message carries that call, else the
+        content parsed as JSON. A refusal arrives in `message.refusal` with `content`
+        null, so it leaves `structured` at `None` and stays on `raw`.
+
         `trace` is left `None`: the leaf stamps it when the call is over.
 
         Args:
             raw: The decoded JSON body of the 200.
-            req: The package that produced it; unread, since the reply is self-contained.
+            req: The package that produced it, read only for its output format.
             model: The model identifier that was sent.
             provider: The provider that answered.
 
@@ -236,6 +323,11 @@ class OpenAIChatAdapter(Adapter[PromptPackage, ModelResponse]):
                 cache_read_tokens=prompt_details.get("cached_tokens") or 0,
             ),
             served_model=raw.get("model"),
+            structured=read_structured(
+                req.output_format,
+                text if isinstance(text, str) else "",
+                _tool_calls(message),
+            ),
             raw=dict(raw),
         )
 

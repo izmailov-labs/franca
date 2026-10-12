@@ -13,11 +13,17 @@ recorded-provider tests, adapted to franca's seams:
   reproducible; its token accounting, stop reason, served model and error taxonomy
   are. Nothing here asserts on generated text beyond it being non-empty.
 
-**Cost.** The whole suite spends exactly **one completion per provider per run**: the
-first test to need a response performs it and every later case reuses the cached
-result. Every failure case is free, because a bad key and a bad model name are both
-rejected before inference. So a full run is two billed requests of roughly twenty
-tokens each, whatever the number of assertions.
+**Cost.** The whole suite spends exactly **two completions per provider per run**: one
+plain, one asking for a JSON-schema answer. The first test to need either performs it
+and every later case reuses the cached result. Every failure case is free, because a
+bad key and a bad model name are both rejected before inference. So a full run is a
+handful of billed requests of a few dozen tokens each, whatever the number of
+assertions.
+
+The structured probe is the one place franca's structured-output *request* is checked
+against a real provider. The adapter tests pin the body franca builds and the mock
+suite pins the parse, but only a live model can say whether the schema field was
+honoured -- an ignored field would come back as prose, and `structured` would be `None`.
 """
 
 from __future__ import annotations
@@ -40,7 +46,7 @@ from franca.chat.endpoints import (
     OPENAI_CHAT_ENDPOINT,
     XAI_CHAT_ENDPOINT,
 )
-from franca.chat.ir import Item, ModelResponse, PromptPackage, SystemBlock
+from franca.chat.ir import Item, ModelResponse, OutputFormat, PromptPackage, SystemBlock
 from franca.chat.model import ChatModel
 from franca.chat.profile import ChatProfile
 from franca.core.clock import AsyncioClock
@@ -194,7 +200,31 @@ PROBE = PromptPackage(
     max_output_tokens=32,
 )
 
+STRUCTURED_PROBE = PromptPackage(
+    system=(SystemBlock(text="You are terse."),),
+    items=(Item(role="user", kind="text", text="Name one primary colour, as JSON."),),
+    max_output_tokens=64,
+    output_format=OutputFormat(
+        kind="json",
+        json_schema={
+            "title": "Colour",
+            "type": "object",
+            "properties": {"colour": {"type": "string"}},
+            "required": ["colour"],
+            "additionalProperties": False,
+        },
+    ),
+)
+"""Native structured output, chosen by default because every built-in profile is empty.
+
+`additionalProperties: false` and a fully `required` property list keep the schema
+inside the strictest rules any of the three wires applies, so a rejection here is about
+the field franca sent rather than the schema it carried. "JSON" is in the prompt because
+OpenAI's JSON mode demands it, which keeps the probe valid for a profile that picks it.
+"""
+
 _CACHE: dict[str, ModelResponse] = {}
+_STRUCTURED_CACHE: dict[str, ModelResponse] = {}
 _UNUSABLE: dict[str, str] = {}
 
 
@@ -249,20 +279,24 @@ def _skip_if_the_account_cannot_serve(case: ProviderCase, error: ModelError) -> 
         pytest.skip(_UNUSABLE[case.name])
 
 
-async def _response(case: ProviderCase) -> ModelResponse:
-    """The one live completion for this provider, performed at most once per run.
+async def _response(
+    case: ProviderCase,
+    probe: PromptPackage = PROBE,
+    cache: dict[str, ModelResponse] = _CACHE,
+) -> ModelResponse:
+    """The live completion of `probe` for this provider, performed at most once per run.
 
     Caching here is what keeps the suite affordable: the assertions below are all
     facts about a single response, so paying for one and asserting many times is both
     cheaper and a stricter test than issuing a fresh request per assertion, which
     would let a flaky field pass on a lucky retry.
     """
-    if case.name in _CACHE:
-        return _CACHE[case.name]
+    if case.name in cache:
+        return cache[case.name]
     key = _require_key(case)
     transport = HttpxTransport()
     try:
-        res = await _model(case, transport, key=key, model=case.model).complete(PROBE)
+        res = await _model(case, transport, key=key, model=case.model).complete(probe)
     except ModelError as exc:
         # A retryable failure is a genuine outage and is left to fail loudly; a
         # permanent auth failure is the account, and skips.
@@ -270,7 +304,7 @@ async def _response(case: ProviderCase) -> ModelResponse:
         raise
     finally:
         await transport.aclose()
-    _CACHE[case.name] = res
+    cache[case.name] = res
     return res
 
 
@@ -340,6 +374,27 @@ async def test_no_key_material_reaches_the_response_or_its_dump(case: ProviderCa
     res = await _response(case)
     for rendered in (repr(res), str(res), res.model_dump_json()):
         assert key not in rendered
+
+
+# ---------------------------------------------------------- the structured call
+
+
+@pytest.mark.parametrize("case", PROVIDERS, ids=IDS)
+async def test_a_native_structured_answer_comes_back_decoded(case: ProviderCase) -> None:
+    """The provider accepted the schema field franca sent, and honoured it.
+
+    A 400 here means the field is spelled wrong for this wire or this model; a `None`
+    `structured` with a prose `text` means the field was accepted and ignored. Either
+    is a finding about the adapter, and the message carries what came back.
+    """
+    res = await _response(case, STRUCTURED_PROBE, _STRUCTURED_CACHE)
+
+    assert res.structured is not None, (
+        f"no JSON object came back: stop_reason={res.stop_reason!r} text={res.text!r}"
+    )
+    assert isinstance(res.structured.get("colour"), str)
+    assert res.trace is not None
+    assert "structured_output" in res.trace.unverified, "no built-in row measures a route yet"
 
 
 # ------------------------------------------------- free cases: rejected pre-inference

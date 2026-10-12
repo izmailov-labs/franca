@@ -31,6 +31,26 @@
       }
     },
     {
+      "match": { "userMessage": "Name one primary colour as JSON." },
+      "response": {
+        "id": "mock-structured-colour",
+        "model": "mock-served-model",
+        "content": "{\"colour\":\"blue\"}",
+        "finishReason": "stop",
+        "usage": { "prompt_tokens": 21, "completion_tokens": 6, "total_tokens": 27 }
+      }
+    },
+    {
+      "match": { "userMessage": "Name one primary colour through a tool." },
+      "response": {
+        "id": "mock-forced-tool",
+        "model": "mock-served-model",
+        "toolCalls": [
+          { "id": "call_mock_2", "name": "Colour", "arguments": { "colour": "blue" } }
+        ]
+      }
+    },
+    {
       "match": { "userMessage": "Rate limit me." },
       "response": {
         "error": { "message": "slow down", "type": "rate_limit_error" },

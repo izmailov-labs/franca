@@ -29,9 +29,10 @@ from franca.chat.dialects.anthropic_messages import (
     DEFAULT_MAX_TOKENS,
     AnthropicMessagesAdapter,
 )
-from franca.chat.ir import Item, ModelResponse, PromptPackage, SystemBlock
+from franca.chat.ir import Item, ModelResponse, OutputFormat, PromptPackage, SystemBlock
 from franca.chat.profile import ChatProfile
 from franca.core.adapter import WireRequest
+from franca.core.enums import Strategy
 from franca.core.errors import ModelError
 from franca.core.ids import ANTHROPIC, ANTHROPIC_MESSAGES, CHAT, OPENAI_CHAT
 from franca.core.profile import BaseProfile
@@ -116,7 +117,7 @@ def test_a_text_only_package_renders_exactly_this_body() -> None:
     assert wire.method == "POST"
     assert wire.path is None, "the endpoint row owns /v1/messages"
     assert wire.stream is False
-    assert wire.unverified == frozenset(), "nothing in this subset is profile-gated"
+    assert wire.unverified == frozenset(), "a package without a JSON answer assumes nothing"
     assert wire.body == {
         "model": MODEL,
         "max_tokens": DEFAULT_MAX_TOKENS,
@@ -367,3 +368,145 @@ def test_a_response_round_trips_back_into_the_next_request() -> None:
         },
         {"role": "user", "content": [{"type": "text", "text": "thanks"}]},
     ], "the answer's own items are legal turns, which is what makes a tool loop portable"
+
+
+# ------------------------------------------------------------------ structured output
+
+SCHEMA: dict[str, Any] = {
+    "title": "Colour",
+    "type": "object",
+    "properties": {"colour": {"type": "string"}},
+    "required": ["colour"],
+    "additionalProperties": False,
+}
+
+BASE_BODY: dict[str, Any] = {
+    "model": MODEL,
+    "max_tokens": DEFAULT_MAX_TOKENS,
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+}
+
+
+def structured(**fmt: Any) -> PromptPackage:
+    return PromptPackage(items=(user("hi"),), output_format=OutputFormat(kind="json", **fmt))
+
+
+def test_the_supported_strategies_are_native_and_tool_calling() -> None:
+    assert AnthropicMessagesAdapter.supports == {Strategy.native, Strategy.tool_calling}
+
+
+def test_a_schema_renders_natively_as_output_config_format() -> None:
+    wire = ADAPTER.to_request(structured(json_schema=SCHEMA), MODEL, PROFILE)
+
+    assert wire.body == {
+        **BASE_BODY,
+        "output_config": {"format": {"type": "json_schema", "schema": SCHEMA}},
+    }
+    assert wire.unverified == {"structured_output"}, "nobody measured this model's route"
+
+
+def test_strict_has_no_knob_on_the_native_route_and_is_not_sent() -> None:
+    body = render(structured(json_schema=SCHEMA, strict=True))
+
+    assert body["output_config"] == {"format": {"type": "json_schema", "schema": SCHEMA}}
+
+
+def test_tool_calling_forces_one_synthesised_tool_named_after_the_schema() -> None:
+    body = render(structured(json_schema=SCHEMA, strategy=Strategy.tool_calling))
+
+    assert body == {
+        **BASE_BODY,
+        "tools": [{"name": "Colour", "input_schema": SCHEMA}],
+        "tool_choice": {"type": "tool", "name": "Colour"},
+    }
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_strict_rides_on_the_forced_tool_when_the_caller_set_it(strict: bool) -> None:
+    body = render(structured(json_schema=SCHEMA, strategy=Strategy.tool_calling, strict=strict))
+
+    assert body["tools"] == [{"name": "Colour", "input_schema": SCHEMA, "strict": strict}]
+
+
+def test_a_profile_that_prefers_tool_calling_gets_it_without_assuming_anything() -> None:
+    profile = ChatProfile(
+        provider=ANTHROPIC, model_prefix="claude-opus", structured_output=Strategy.tool_calling
+    )
+    wire = ADAPTER.to_request(structured(json_schema=SCHEMA), MODEL, profile)
+
+    assert body_of(wire)["tool_choice"] == {"type": "tool", "name": "Colour"}
+    assert wire.unverified == frozenset()
+
+
+def test_json_mode_has_no_route_on_this_wire_and_raises_rather_than_substituting() -> None:
+    with pytest.raises(ModelError, match="strategy=json_mode") as caught:
+        ADAPTER.to_request(
+            structured(json_schema=SCHEMA, strategy=Strategy.json_mode), MODEL, PROFILE
+        )
+
+    assert caught.value.failure_class == "unsupported"
+    assert caught.value.provider == ANTHROPIC
+
+
+def test_json_without_a_schema_raises_because_only_json_mode_could_serve_it() -> None:
+    with pytest.raises(ModelError, match="only json_mode applies") as caught:
+        ADAPTER.to_request(structured(), MODEL, PROFILE)
+
+    assert caught.value.failure_class == "unsupported"
+
+
+def test_an_effort_override_sits_beside_the_format_rather_than_replacing_it() -> None:
+    """`output_config` carries both; a shallow merge would silently drop the schema."""
+    pkg = PromptPackage(
+        items=(user("hi"),),
+        output_format=OutputFormat(kind="json", json_schema=SCHEMA),
+        provider_options={ANTHROPIC_MESSAGES: {"output_config": {"effort": "high"}}},
+    )
+
+    assert render(pkg)["output_config"] == {
+        "format": {"type": "json_schema", "schema": SCHEMA},
+        "effort": "high",
+    }
+
+
+def test_a_native_answer_is_decoded_from_the_text_block() -> None:
+    raw = {**ANTHROPIC_200, "content": [{"type": "text", "text": '{"colour": "blue"}'}]}
+    res = ADAPTER.from_response(raw, structured(json_schema=SCHEMA), MODEL, ANTHROPIC)
+
+    assert res.structured == {"colour": "blue"}
+    assert res.text == '{"colour": "blue"}', "the JSON is still the answer's text"
+
+
+def test_a_tool_calling_answer_is_the_forced_tools_input() -> None:
+    raw = {
+        **ANTHROPIC_200,
+        "content": [
+            {"type": "tool_use", "id": "toolu_01", "name": "Colour", "input": {"colour": "blue"}}
+        ],
+        "stop_reason": "tool_use",
+    }
+    pkg = structured(json_schema=SCHEMA, strategy=Strategy.tool_calling)
+    res = ADAPTER.from_response(raw, pkg, MODEL, ANTHROPIC)
+
+    assert res.structured == {"colour": "blue"}
+    assert res.items == (), "the tool call is not an item until the IR carries tools"
+    assert res.stop_reason == "tool_use"
+
+
+def test_a_truncated_answer_leaves_structured_empty_and_the_reply_intact() -> None:
+    raw = {
+        **ANTHROPIC_200,
+        "content": [{"type": "text", "text": '{"colour": "bl'}],
+        "stop_reason": "max_tokens",
+    }
+    res = ADAPTER.from_response(raw, structured(json_schema=SCHEMA), MODEL, ANTHROPIC)
+
+    assert res.structured is None
+    assert res.text == '{"colour": "bl'
+    assert res.stop_reason == "max_tokens", "which is how the caller learns why"
+
+
+def test_json_text_is_not_decoded_when_no_json_answer_was_asked_for() -> None:
+    raw = {**ANTHROPIC_200, "content": [{"type": "text", "text": '{"colour": "blue"}'}]}
+
+    assert ADAPTER.from_response(raw, PromptPackage(), MODEL, ANTHROPIC).structured is None

@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-12
+
+### Added
+
+- Structured output on all three chat dialects. `PromptPackage.output_format` was accepted
+  before but silently dropped by every adapter, so a caller asking for JSON got prose
+  with no error. Each adapter now declares the strategies it can render (`supports`) and
+  renders the one `pick_strategy` chooses:
+  - `native`: Anthropic `output_config.format`, OpenAI `response_format` `json_schema`, and
+    Gemini `generationConfig.responseJsonSchema`.
+  - `tool_calling`: one synthesised tool, forced on each wire.
+  - `json_mode`: OpenAI `json_object` and Gemini `responseMimeType`.
+
+  An explicit strategy the wire lacks raises `unsupported` rather than being substituted;
+  this is what happens to `json_mode` on Anthropic. `ModelResponse.structured` is filled
+  from the forced tool's arguments or the JSON text, and is `None` when the reply holds no
+  JSON object. A profile with no `structured_output` adds `"structured_output"` to
+  `WireRequest.unverified`, and `strict=True` adds `"strict_enforced"` unless the row
+  vouches for it. `strict_enforced=False` raises.
+- `franca.chat.dialects.common`: the decisions every chat wire must make the same way.
+  These are `pick_strategy`, `schema_name`, `decode_object`, `read_structured` and
+  `merge_provider_options`.
+- Tests for structured output at every level:
+  - adapter bodies and parses;
+  - a byte-exact cassette through `ChatModel`;
+  - the cross-dialect claim in `test_dialect_unification.py`;
+  - both response routes over real HTTP on all five aimock rows;
+  - a live structured probe per provider in the contract suite, which now spends two
+    completions per provider per run.
+
+  The default `native` route was verified live on 2026-10-12: each provider accepted the
+  schema field franca sent and returned an answer that decoded into `structured`. The
+  models were `claude-haiku-4-5-20251001`, `gpt-4.1-nano` and `gemini-3.5-flash-lite`. That
+  run was also the first time the Google row of the contract suite ran at all. The
+  `tool_calling` and `json_mode` request shapes are checked offline only.
+
+### Changed
+
+- `provider_options` is merged deeply rather than by top-level replace. Where both sides
+  hold an object under one key, the two merge and the caller wins on every leaf. Before,
+  `{"generationConfig": {"temperature": 0.2}}` on Gemini replaced the whole object,
+  deleting the computed `maxOutputTokens`. With structured output it would also have
+  deleted the response schema, and Anthropic's `output_config.effort` would have deleted
+  `output_config.format`. A scalar or list override still replaces.
+- `OutputFormat` rejects contradictory fields when it is constructed. The rejected cases are:
+  - `json_schema`, `strict` or `strategy` without `kind="json"`;
+  - a schema whose root `type` is not `object`;
+  - `native` or `tool_calling` without a schema;
+  - `strict=True` without a schema, or with `json_mode`.
+
+  Each of these was accepted before and then reached no wire.
+
 ## [0.1.1] - 2026-09-30
 
 ### Added
@@ -74,6 +126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wire. Nothing in franca changed between the sweeps; the provider did, which is
   the case `verified` dates exist for.
 
-[Unreleased]: https://github.com/izmailov-labs/franca/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/izmailov-labs/franca/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/izmailov-labs/franca/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/izmailov-labs/franca/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/izmailov-labs/franca/releases/tag/v0.1.0

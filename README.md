@@ -251,6 +251,71 @@ from franca.core.ids import XAI
 #   profile=CHAT_PROFILES.resolve(XAI, "grok-4.6")
 ```
 
+### Structured output
+
+Ask for a JSON answer with `output_format`, and read it back from `structured`. The schema
+is plain JSON Schema, so a pydantic model can supply it:
+
+```python
+from pydantic import BaseModel, ConfigDict
+
+from franca.chat.ir import OutputFormat
+
+
+class Colour(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # emits "additionalProperties": false
+    colour: str
+
+
+res = await model.complete(
+    PromptPackage(
+        items=(Item(role="user", kind="text", text="Name one primary colour."),),
+        output_format=OutputFormat(kind="json", json_schema=Colour.model_json_schema()),
+    )
+)
+if res.structured is not None:
+    print(Colour.model_validate(res.structured))  # colour='Blue'
+```
+
+The same package works on every wire. What changes is how the schema is enforced, which
+is the `strategy`:
+
+| Strategy | `anthropic_messages` | `openai_chat` | `google_generate_content` |
+| --- | --- | --- | --- |
+| `native` | `output_config.format` | `response_format` `json_schema` | `generationConfig.responseJsonSchema` |
+| `tool_calling` | one forced tool, `tool_choice` | one forced function, `tool_choice` | one declared function, `toolConfig` mode `ANY` |
+| `json_mode` | — | `response_format` `json_object` | `generationConfig.responseMimeType` |
+
+Leave `strategy` unset and franca picks one. The profile's `structured_output` wins if a
+row measured it; otherwise franca takes the strongest guarantee the wire offers, in the
+order `native`, `tool_calling`, `json_mode`. A strategy you name is never swapped for
+another: if the wire can't render it, as with `json_mode` on Anthropic, the call raises
+`ModelError(failure_class="unsupported")` before anything is sent. No built-in row has
+measured a route yet, so a structured call records `structured_output` in
+`trace.unverified`. `strict=True` also records `strict_enforced`, unless a row vouches for
+it.
+
+A few things are worth knowing:
+
+- **`structured` is `None` when the reply is not a JSON object.** That covers an answer cut
+  off by `max_output_tokens` and a refusal written as prose. A reply that already arrived is
+  never turned into an exception, so check `stop_reason` and `text`. franca does not check
+  the value against your schema; `model_validate` does that.
+- **Contradictions fail when the format is built.** A `json_schema` without `kind="json"`, a
+  schema whose root is not an object, `strict=True` with no schema, and `strict=True` with
+  `json_mode` are all rejected by `OutputFormat` itself.
+- **A schema that every wire accepts is narrower than JSON Schema.** It has an object root,
+  `additionalProperties: false` on every object, every property in `required`, and no
+  numeric or string-length constraints. Anthropic and OpenAI's strict mode enforce
+  restrictions like these.
+- **JSON mode sends no schema.** It guarantees only that the answer parses, and OpenAI
+  rejects it unless the word "JSON" appears in the prompt. franca does not rewrite your
+  prompt to make that true.
+
+`provider_options` is merged *deeply*, so `{"generationConfig": {"temperature": 0.2}}` sits
+beside Gemini's response schema instead of replacing it. Likewise, Anthropic's
+`{"output_config": {"effort": "high"}}` sits beside `format`.
+
 ### Streaming
 
 The IR-level stream is not built yet, and the leaf says so rather than shipping half a

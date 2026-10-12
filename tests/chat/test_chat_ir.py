@@ -29,7 +29,7 @@ from franca.chat.ir import (
     SystemBlock,
     ToolDef,
 )
-from franca.core.enums import StateMode
+from franca.core.enums import StateMode, Strategy
 from franca.core.ids import ANTHROPIC, ANTHROPIC_MESSAGES
 from franca.core.types import CallTrace, HasTrace, Usage
 
@@ -106,6 +106,57 @@ def test_output_format_defaults() -> None:
     assert output_format.json_schema is None
     assert output_format.strict is None
     assert output_format.strategy is None
+
+
+OBJECT_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"x": {"type": "integer"}}}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"kind": "json"},
+        {"kind": "json", "json_schema": OBJECT_SCHEMA},
+        {"kind": "json", "json_schema": OBJECT_SCHEMA, "strict": True},
+        {"kind": "json", "json_schema": OBJECT_SCHEMA, "strategy": Strategy.tool_calling},
+        {"kind": "json", "json_schema": OBJECT_SCHEMA, "strategy": Strategy.json_mode},
+        {"kind": "json", "json_schema": {"$ref": "#/$defs/A"}, "strategy": Strategy.native},
+        {"kind": "json", "strategy": Strategy.json_mode, "strict": False},
+        {"kind": "text"},
+    ],
+)
+def test_a_consistent_output_format_is_accepted(kwargs: dict[str, Any]) -> None:
+    """A schema without a root `type` -- a `$ref`, an `anyOf` -- is given the benefit."""
+    OutputFormat(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"json_schema": OBJECT_SCHEMA}, "set kind='json'"),
+        ({"kind": "text", "json_schema": OBJECT_SCHEMA}, "set kind='json'"),
+        ({"strict": True}, "set kind='json'"),
+        ({"strategy": Strategy.native}, "set kind='json'"),
+        ({"kind": "json", "json_schema": {"type": "array"}}, "must be an object"),
+        ({"kind": "json", "strategy": Strategy.native}, "strategy=native enforces"),
+        ({"kind": "json", "strategy": Strategy.tool_calling}, "strategy=tool_calling enforces"),
+        ({"kind": "json", "strict": True}, "strict=True needs a json_schema"),
+        (
+            {
+                "kind": "json",
+                "json_schema": OBJECT_SCHEMA,
+                "strict": True,
+                "strategy": Strategy.json_mode,
+            },
+            "json_mode guarantees well-formed JSON",
+        ),
+    ],
+)
+def test_a_contradictory_output_format_is_refused_when_it_is_built(
+    kwargs: dict[str, Any], needle: str
+) -> None:
+    """Each of these would otherwise be accepted and then reach no wire at all."""
+    with pytest.raises(ValidationError, match=needle):
+        OutputFormat(**kwargs)
 
 
 def test_package_meta_defaults() -> None:
@@ -253,6 +304,9 @@ def test_a_package_round_trips_through_json() -> None:
         system=(SystemBlock(text="be brief", position=1),),
         items=(Item(role="user", kind="text", text="hi", artifact={"signature": SIGNATURE}),),
         tools=(ToolDef(name="search", parameters={"type": "object"}),),
+        output_format=OutputFormat(
+            kind="json", json_schema=OBJECT_SCHEMA, strict=True, strategy=Strategy.native
+        ),
         max_output_tokens=64,
         sampling={"temperature": 0.2},
     )

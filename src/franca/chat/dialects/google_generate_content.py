@@ -25,15 +25,37 @@ prompt *including* whatever `cachedContentTokenCount` reports, while Anthropic's
 meter of the same name and nothing is reconciled: subtracting one from the other would
 be a claim about which convention `Usage` means, and no measurement here supports one.
 The divergence is recorded rather than smoothed over.
+
+**The response schema lives next to the budget.** Structured output is
+`generationConfig.responseMimeType` plus `responseJsonSchema` -- the field that takes
+JSON Schema as written, rather than `responseSchema`, which takes Google's OpenAPI
+subset and would need the caller's schema translated. JSON mode is the MIME type alone,
+and a forced tool is one `functionDeclarations` entry with `parametersJsonSchema`, pinned
+by `toolConfig`. Because the schema shares `generationConfig` with `maxOutputTokens` and
+with every sampling knob a caller passes through `provider_options`, that escape hatch
+is merged deeply: a `temperature` override must not delete the schema.
+
+One field to watch. As of the 2026-10-10 discovery document, the v1beta reference
+marks both `responseSchema` and `responseJsonSchema` deprecated in favour of a newer
+`generationConfig.responseFormat`, while Google's own SDK still sends
+`responseJsonSchema`. This adapter follows the SDK -- the field that is known to be on
+the wire -- until a live probe says otherwise.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 from urllib.parse import quote
 
-from franca.chat.ir import Item, ModelResponse, PromptPackage
+from franca.chat.dialects.common import (
+    merge_provider_options,
+    pick_strategy,
+    read_structured,
+    schema_name,
+)
+from franca.chat.ir import Item, ModelResponse, OutputFormat, PromptPackage
 from franca.chat.profile import ChatProfile
 from franca.core.adapter import Adapter, WireRequest
+from franca.core.enums import Strategy
 from franca.core.errors import ModelError
 from franca.core.ids import CHAT, GOOGLE_GENERATE_CONTENT, Provider
 from franca.core.profile import BaseProfile
@@ -59,6 +81,14 @@ _WIRE_ROLE: Final[Mapping[str, str]] = {
 
 _API_KEY_REASONS: Final = frozenset({"API_KEY_INVALID", "ACCESS_TOKEN_TYPE_UNSUPPORTED"})
 """`google.rpc.ErrorInfo` reasons that mean the credential is wrong, whatever the status."""
+
+_FORCED_TOOL_DESCRIPTION: Final = "Return the answer in the requested structure."
+"""The forced tool's description when the schema carries none of its own.
+
+The v1beta reference lists `FunctionDeclaration.description` as required, unlike the
+other two wires, so the forced tool always sends one. The schema's own `description`
+is preferred, because it describes the answer in the caller's words.
+"""
 
 
 def _max_tokens(pkg: PromptPackage, profile: BaseProfile) -> int:
@@ -137,6 +167,53 @@ def _contents(pkg: PromptPackage, provider: Provider) -> list[dict[str, Any]]:
     return contents
 
 
+def _structured(fmt: OutputFormat, strategy: Strategy) -> dict[str, Any]:
+    """Render the chosen structured-output strategy as body keys.
+
+    Returned as a partial body to merge, not to `update`, because the native and JSON
+    mode keys belong inside `generationConfig`, beside the budget already there. This
+    wire has no `strict` knob, so `strict` is not sent; `pick_strategy` has already
+    recorded whether the profile vouches for enforcement.
+
+    Args:
+        fmt: The package's output format, already checked by `pick_strategy`.
+        strategy: Any of the three; this wire supports them all.
+
+    Returns:
+        The keys to merge into the body.
+    """
+    if strategy is Strategy.json_mode:
+        return {"generationConfig": {"responseMimeType": "application/json"}}
+    if strategy is Strategy.native:
+        return {
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": fmt.json_schema,
+            }
+        }
+    name = schema_name(fmt)
+    described: object = (fmt.json_schema or {}).get("description")
+    declaration = {
+        "name": name,
+        "description": described if isinstance(described, str) else _FORCED_TOOL_DESCRIPTION,
+        "parametersJsonSchema": fmt.json_schema,
+    }
+    return {
+        "tools": [{"functionDeclarations": [declaration]}],
+        "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": [name]}},
+    }
+
+
+def _parts(raw: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    """The first candidate's parts, skipping anything that is not an object."""
+    candidates: Sequence[Any] = raw.get("candidates") or ()
+    if not candidates:
+        return ()
+    content: Mapping[str, Any] = candidates[0].get("content") or {}
+    parts: Sequence[Any] = content.get("parts") or ()
+    return tuple(part for part in parts if isinstance(part, Mapping))
+
+
 def _text_parts(raw: Mapping[str, Any]) -> tuple[str, ...]:
     """Pull the answer's prose out of the first candidate's parts.
 
@@ -153,18 +230,21 @@ def _text_parts(raw: Mapping[str, Any]) -> tuple[str, ...]:
     Returns:
         The text of each qualifying part, in wire order.
     """
-    candidates: Sequence[Any] = raw.get("candidates") or ()
-    if not candidates:
-        return ()
-    content: Mapping[str, Any] = candidates[0].get("content") or {}
-    parts: Sequence[Any] = content.get("parts") or ()
     return tuple(
         part["text"]
-        for part in parts
-        if isinstance(part, Mapping)
-        and isinstance(part.get("text"), str)
-        and part.get("thought") is not True
+        for part in _parts(raw)
+        if isinstance(part.get("text"), str) and part.get("thought") is not True
     )
+
+
+def _function_calls(raw: Mapping[str, Any]) -> list[tuple[object, object]]:
+    """Read the first candidate's `functionCall` parts as `(name, args)` pairs."""
+    pairs: list[tuple[object, object]] = []
+    for part in _parts(raw):
+        call: object = part.get("functionCall")
+        if isinstance(call, Mapping):
+            pairs.append((call.get("name"), call.get("args")))
+    return pairs
 
 
 def _finish_reason(raw: Mapping[str, Any]) -> str | None:
@@ -208,17 +288,24 @@ class GoogleGenerateContentAdapter(Adapter[PromptPackage, ModelResponse]):
 
     Stateless and cheap to construct, as the `Adapter` contract requires.
 
-    What this adapter renders today is text turns, the output budget and the system
-    instruction; what it reads back is the first candidate's text parts, the three
-    token meters this wire reports, `finishReason` and `modelVersion`. Tools, thinking
-    budgets, thought signatures, images and structured output are all part of the
-    dialect and none of them is here yet; so is the Interactions surface, which is a
-    separate dialect rather than a variant of this one.
+    What this adapter renders today is text turns, the output budget, the system
+    instruction and structured output; what it reads back is the first candidate's
+    text parts, the three token meters this wire reports, `finishReason`,
+    `modelVersion` and the structured answer. Tools, thinking budgets, thought
+    signatures and images are all part of the dialect and none of them is here yet;
+    so is the Interactions surface, which is a separate dialect rather than a variant
+    of this one.
+
+    Attributes:
+        supports: The structured-output strategies this wire can render.
     """
 
     capability = CHAT
     dialect = GOOGLE_GENERATE_CONTENT
     status = "stable"
+    supports: ClassVar[frozenset[Strategy]] = frozenset(
+        {Strategy.native, Strategy.tool_calling, Strategy.json_mode}
+    )
 
     def to_request(
         self,
@@ -235,9 +322,12 @@ class GoogleGenerateContentAdapter(Adapter[PromptPackage, ModelResponse]):
         makes the call a stream, and `WireRequest.stream` tells the connector to read
         the reply as events.
 
-        `provider_options[google_generate_content]` is merged last and validated
-        after, so a caller's override wins over anything computed here. The keys it
-        carries are wire keys, which on this dialect means camelCase.
+        The structured-output keys are merged in when a JSON answer was asked for; see
+        `pick_strategy` for what that adds to `WireRequest.unverified`.
+        `provider_options[google_generate_content]` is merged last and deeply, so a
+        caller's override wins over anything computed here without deleting its
+        neighbours. The keys it carries are wire keys, which on this dialect means
+        camelCase.
 
         Args:
             req: The package to render.
@@ -249,8 +339,10 @@ class GoogleGenerateContentAdapter(Adapter[PromptPackage, ModelResponse]):
             The request for the `Connector` to send, carrying its own path.
 
         Raises:
-            ModelError: If an item is outside what this subset can express.
+            ModelError: If an item is outside what this subset can express, or the
+                output format cannot be rendered on this wire.
         """
+        unverified: set[str] = set()
         body: dict[str, Any] = {
             "contents": _contents(req, profile.provider),
             "generationConfig": {"maxOutputTokens": _max_tokens(req, profile)},
@@ -258,8 +350,18 @@ class GoogleGenerateContentAdapter(Adapter[PromptPackage, ModelResponse]):
         system = req.system_text()
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
-        body.update(req.provider_options.get(GOOGLE_GENERATE_CONTENT, {}))
-        return WireRequest(body=body, stream=stream, path=path_for(model, stream=stream))
+        strategy = pick_strategy(
+            req.output_format, profile, self.supports, GOOGLE_GENERATE_CONTENT, unverified
+        )
+        if strategy is not None:
+            body = merge_provider_options(body, _structured(req.output_format, strategy))
+        body = merge_provider_options(body, req.provider_options.get(GOOGLE_GENERATE_CONTENT, {}))
+        return WireRequest(
+            body=body,
+            stream=stream,
+            path=path_for(model, stream=stream),
+            unverified=frozenset(unverified),
+        )
 
     def from_response(
         self,
@@ -280,11 +382,15 @@ class GoogleGenerateContentAdapter(Adapter[PromptPackage, ModelResponse]):
         snapshot actually answered. It is absent from some compatibility surfaces, and
         `None` is then the honest answer.
 
+        When the package asked for a JSON answer, `structured` is the forced
+        function's `args` if a `functionCall` part names it, else the text parts
+        joined and parsed as JSON. Thought parts are never part of that text.
+
         `trace` is left `None`: the leaf stamps it when the call is over.
 
         Args:
             raw: The decoded JSON body of the 200.
-            req: The package that produced it; unread, since the reply is self-contained.
+            req: The package that produced it, read only for its output format.
             model: The model identifier that was addressed.
             provider: The provider that answered.
 
@@ -293,11 +399,12 @@ class GoogleGenerateContentAdapter(Adapter[PromptPackage, ModelResponse]):
         """
         usage: Mapping[str, Any] = raw.get("usageMetadata") or {}
         served: object = raw.get("modelVersion")
+        texts = _text_parts(raw)
         return ModelResponse(
             model=model,
             provider=provider,
             dialect=GOOGLE_GENERATE_CONTENT,
-            items=tuple(Item(role="model", kind="text", text=text) for text in _text_parts(raw)),
+            items=tuple(Item(role="model", kind="text", text=text) for text in texts),
             stop_reason=_finish_reason(raw),
             usage=Usage(
                 input_tokens=usage.get("promptTokenCount") or 0,
@@ -305,6 +412,7 @@ class GoogleGenerateContentAdapter(Adapter[PromptPackage, ModelResponse]):
                 cache_read_tokens=usage.get("cachedContentTokenCount") or 0,
             ),
             served_model=served if isinstance(served, str) else None,
+            structured=read_structured(req.output_format, "".join(texts), _function_calls(raw)),
             raw=dict(raw),
         )
 

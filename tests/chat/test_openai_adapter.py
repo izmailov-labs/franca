@@ -11,8 +11,9 @@ from typing import Any
 import pytest
 
 from franca.chat.dialects.openai_chat import DEFAULT_MAX_TOKENS, OpenAIChatAdapter
-from franca.chat.ir import Item, PromptPackage, SystemBlock
+from franca.chat.ir import Item, OutputFormat, PromptPackage, SystemBlock
 from franca.chat.profile import ChatProfile
+from franca.core.enums import Strategy
 from franca.core.errors import ModelError
 from franca.core.ids import OPENAI, OPENAI_CHAT
 
@@ -296,3 +297,161 @@ def test_the_quota_message_does_not_echo_the_providers_text() -> None:
     assert refined is not None
     assert "no remaining quota" in str(refined)
     assert refined.raw == LIVE_429_QUOTA  # the original stays available for inspection
+
+
+# ---------------------------------------------------------------- structured output
+
+SCHEMA: dict[str, Any] = {
+    "title": "Colour",
+    "type": "object",
+    "properties": {"colour": {"type": "string"}},
+    "required": ["colour"],
+    "additionalProperties": False,
+}
+
+BASE_BODY: dict[str, Any] = {
+    "model": MODEL,
+    "messages": [{"role": "user", "content": "hi"}],
+    "max_completion_tokens": DEFAULT_MAX_TOKENS,
+}
+
+
+def _structured(**fmt: Any) -> PromptPackage:
+    return PromptPackage(
+        items=(Item(role="user", kind="text", text="hi"),),
+        output_format=OutputFormat(kind="json", **fmt),
+    )
+
+
+def _body(pkg: PromptPackage) -> dict[str, Any]:
+    body = _adapter().to_request(pkg, MODEL, PROFILE).body
+    assert body is not None
+    return body
+
+
+def test_every_strategy_has_a_field_on_this_wire() -> None:
+    assert OpenAIChatAdapter.supports == frozenset(Strategy)
+
+
+def test_a_schema_renders_natively_as_a_named_json_schema_response_format() -> None:
+    wire = _adapter().to_request(_structured(json_schema=SCHEMA), MODEL, PROFILE)
+
+    assert wire.body == {
+        **BASE_BODY,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "Colour", "schema": SCHEMA},
+        },
+    }
+    assert wire.unverified == {"structured_output"}
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_strict_is_sent_only_when_the_caller_set_it(strict: bool) -> None:
+    body = _body(_structured(json_schema=SCHEMA, strict=strict))
+
+    assert body["response_format"]["json_schema"]["strict"] is strict
+    assert "strict" not in _body(_structured(json_schema=SCHEMA))["response_format"]["json_schema"]
+
+
+def test_json_mode_is_a_json_object_response_format_that_sends_no_schema() -> None:
+    body = _body(_structured(json_schema=SCHEMA, strategy=Strategy.json_mode))
+
+    assert body == {**BASE_BODY, "response_format": {"type": "json_object"}}
+
+
+def test_json_without_a_schema_takes_json_mode() -> None:
+    assert _body(_structured())["response_format"] == {"type": "json_object"}
+
+
+def test_tool_calling_forces_one_function_named_after_the_schema() -> None:
+    body = _body(_structured(json_schema=SCHEMA, strategy=Strategy.tool_calling, strict=True))
+
+    assert body == {
+        **BASE_BODY,
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "Colour", "parameters": SCHEMA, "strict": True},
+            }
+        ],
+        "tool_choice": {"type": "function", "function": {"name": "Colour"}},
+    }
+
+
+def test_a_schema_without_a_usable_title_is_sent_as_response() -> None:
+    body = _body(_structured(json_schema={"type": "object", "title": "My colour"}))
+
+    assert body["response_format"]["json_schema"]["name"] == "response"
+
+
+def test_a_native_answer_is_decoded_from_the_message_content() -> None:
+    raw = {
+        **LIVE_200,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": '{"colour": "blue"}'},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    res = _adapter().from_response(raw, _structured(json_schema=SCHEMA), MODEL, OPENAI)
+
+    assert res.structured == {"colour": "blue"}
+    assert res.text == '{"colour": "blue"}'
+
+
+def test_a_tool_calling_answer_decodes_the_arguments_string() -> None:
+    """This wire sends the arguments JSON-encoded, unlike the other two."""
+    raw = {
+        **LIVE_200,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "Colour", "arguments": '{"colour": "blue"}'},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+    }
+    pkg = _structured(json_schema=SCHEMA, strategy=Strategy.tool_calling)
+    res = _adapter().from_response(raw, pkg, MODEL, OPENAI)
+
+    assert res.structured == {"colour": "blue"}
+    assert res.items == ()
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [None, [], ["not an object"], [{"function": "not an object"}], [{"type": "function"}]],
+)
+def test_malformed_tool_calls_are_skipped_rather_than_raising(tool_calls: object) -> None:
+    raw = {"choices": [{"message": {"content": '{"colour": "blue"}', "tool_calls": tool_calls}}]}
+    res = _adapter().from_response(raw, _structured(json_schema=SCHEMA), MODEL, OPENAI)
+
+    assert res.structured == {"colour": "blue"}, "with no forced call, the content is the answer"
+
+
+def test_a_refusal_leaves_structured_empty_and_stays_on_raw() -> None:
+    raw = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": None, "refusal": "I can't help."},
+                "finish_reason": "stop",
+            }
+        ]
+    }
+    res = _adapter().from_response(raw, _structured(json_schema=SCHEMA), MODEL, OPENAI)
+
+    assert res.structured is None
+    assert res.raw["choices"][0]["message"]["refusal"] == "I can't help."

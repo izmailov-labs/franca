@@ -1,12 +1,12 @@
 """The Anthropic Messages wire: `PromptPackage` onto `POST /v1/messages`, and back.
 
 This is the M0 subset of the dialect -- text turns, `max_tokens`, the top-level
-`system` string, `stream`, and the four token meters coming back -- and it is a
-subset on purpose: everything here is behaviour that a walking skeleton exercises end
-to end, so the adapter seam, the connector and the trace stamp are all provable
-before tools, thinking, images and caching arrive.
+`system` string, `stream`, and the four token meters coming back -- plus structured
+output. It is a subset on purpose: everything here is behaviour that a walking
+skeleton exercises end to end, so the adapter seam, the connector and the trace stamp
+are all provable before tools, thinking, images and caching arrive.
 
-Three things about the wire drive the shape of the code below.
+Four things about the wire drive the shape of the code below.
 
 `max_tokens` is **required** by the Messages API: a request without it is a 400, so
 this adapter always emits one. It is an output *budget*, never a sampling parameter,
@@ -18,18 +18,39 @@ the wire expects one message per role run, carrying a list of content blocks. So
 adjacent IR items of the same wire role become one message with several blocks, and
 the message is what the *wire* considers a turn rather than what the caller typed.
 
-`provider_options[ANTHROPIC_MESSAGES]` is merged **last** and validated after, so a
-caller can override any key this adapter computed. That ordering is the escape hatch:
-a wire feature franca has no field for is one dict away, and it never has to fight
-what the adapter decided.
+Structured output takes two routes here, and JSON mode is not one of them. `native` is
+`output_config.format`, a JSON Schema the API enforces, answered as an ordinary text
+block holding the JSON; the documented schema rules ask for `additionalProperties:
+false` on every object. `tool_calling` synthesises one tool whose `input_schema` is the
+schema and forces it with `tool_choice`, so the answer arrives as that tool's `input`.
+It is a fallback for older models, not an equal: the documentation says the newest
+models (Opus 5.5, Sonnet 5.5, Fable 5.1) answer a forced `tool_choice` with a 400.
+That is documented, not measured, so no profile row encodes it -- nothing picks this
+route unless a caller or a row names it. This wire has no schema-free JSON switch:
+the old route was an assistant prefill of `{`, which the 5 generation answers with a
+400 (measured 2026-09-16, see `chat/profiles.py`). An explicit `json_mode` therefore
+raises instead of quietly becoming something else.
+
+`provider_options[ANTHROPIC_MESSAGES]` is merged **last**, deeply, and validated after,
+so a caller can override any key this adapter computed. That ordering is the escape
+hatch: a wire feature franca has no field for is one dict away, and it never has to
+fight what the adapter decided. Deep matters here: `output_config` holds `effort` as
+well as `format`, and an override of one must not delete the other.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
-from franca.chat.ir import Item, ModelResponse, PromptPackage
+from franca.chat.dialects.common import (
+    merge_provider_options,
+    pick_strategy,
+    read_structured,
+    schema_name,
+)
+from franca.chat.ir import Item, ModelResponse, OutputFormat, PromptPackage
 from franca.chat.profile import ChatProfile
 from franca.core.adapter import Adapter, WireRequest
+from franca.core.enums import Strategy
 from franca.core.errors import ModelError
 from franca.core.ids import ANTHROPIC_MESSAGES, CHAT, Provider
 from franca.core.profile import BaseProfile
@@ -117,6 +138,28 @@ def _messages(pkg: PromptPackage, provider: Provider) -> list[dict[str, Any]]:
     return messages
 
 
+def _structured(fmt: OutputFormat, strategy: Strategy) -> dict[str, Any]:
+    """Render the chosen structured-output strategy as top-level body keys.
+
+    `strict` has a knob only on a tool definition. The native route has none, because
+    `output_config.format` is always enforced, so a `strict` there is not sent.
+
+    Args:
+        fmt: The package's output format, already checked by `pick_strategy`.
+        strategy: `native` or `tool_calling`; the only two in `supports`.
+
+    Returns:
+        The keys to add to the body.
+    """
+    if strategy is Strategy.native:
+        return {"output_config": {"format": {"type": "json_schema", "schema": fmt.json_schema}}}
+    name = schema_name(fmt)
+    tool: dict[str, Any] = {"name": name, "input_schema": fmt.json_schema}
+    if fmt.strict is not None:
+        tool["strict"] = fmt.strict
+    return {"tools": [tool], "tool_choice": {"type": "tool", "name": name}}
+
+
 class AnthropicMessagesAdapter(Adapter[PromptPackage, ModelResponse]):
     """Translate the chat IR into Anthropic's Messages wire, and its reply back.
 
@@ -124,15 +167,20 @@ class AnthropicMessagesAdapter(Adapter[PromptPackage, ModelResponse]):
     keeps one instance and shares it across every call.
 
     What this adapter renders today is text turns, the output budget, the system
-    string and the stream flag; what it reads back is text blocks, the four token
-    meters, `stop_reason` and `served_model`. Tools, thinking, images, cache control,
-    structured output and refusal parsing are all part of the dialect and none of them
-    is here yet -- they arrive with the full IR, together with their profile gates.
+    string, the stream flag and structured output; what it reads back is text blocks,
+    the four token meters, `stop_reason`, `served_model` and the structured answer.
+    Tools, thinking, images, cache control and refusal parsing are all part of the
+    dialect and none of them is here yet -- they arrive with the full IR, together
+    with their profile gates.
+
+    Attributes:
+        supports: The structured-output strategies this wire can render.
     """
 
     capability = CHAT
     dialect = ANTHROPIC_MESSAGES
     status = "stable"
+    supports: ClassVar[frozenset[Strategy]] = frozenset({Strategy.native, Strategy.tool_calling})
 
     def to_request(
         self,
@@ -149,15 +197,16 @@ class AnthropicMessagesAdapter(Adapter[PromptPackage, ModelResponse]):
         code change.
 
         The body is `model`, the resolved `max_tokens` and `messages`, plus `system`
-        when there is any system text and `stream` only when streaming was asked for
-        -- an absent key and a `false` are not the same thing to a cassette diff, and
-        the smaller body is the honest one. `provider_options[anthropic_messages]` is
-        then merged over all of it and the result validated, so a caller's override
-        wins over anything computed here.
+        when there is any system text, the structured-output keys when a JSON answer
+        was asked for, and `stream` only when streaming was asked for -- an absent key
+        and a `false` are not the same thing to a cassette diff, and the smaller body
+        is the honest one. `provider_options[anthropic_messages]` is then merged
+        deeply over all of it, so a caller's override wins over anything computed
+        here.
 
-        Nothing in this subset is profile-gated, so `WireRequest.unverified` stays
-        empty: `max_tokens` is a budget and is emitted whatever `sampling_allowed`
-        says.
+        Structured output is the only profile-gated part of this subset; see
+        `pick_strategy` for what it adds to `WireRequest.unverified`. `max_tokens` is
+        a budget and is emitted whatever `sampling_allowed` says.
 
         Args:
             req: The package to render.
@@ -169,9 +218,11 @@ class AnthropicMessagesAdapter(Adapter[PromptPackage, ModelResponse]):
             The request for the `Connector` to send.
 
         Raises:
-            ModelError: If an item is outside what this subset can express; see
-                `_messages`.
+            ModelError: If an item is outside what this subset can express (see
+                `_messages`), or the output format asks for a strategy this wire
+                cannot render (see `pick_strategy`).
         """
+        unverified: set[str] = set()
         body: dict[str, Any] = {
             "model": model,
             "max_tokens": _max_tokens(req, profile),
@@ -180,10 +231,15 @@ class AnthropicMessagesAdapter(Adapter[PromptPackage, ModelResponse]):
         system = req.system_text()
         if system:
             body["system"] = system
+        strategy = pick_strategy(
+            req.output_format, profile, self.supports, ANTHROPIC_MESSAGES, unverified
+        )
+        if strategy is not None:
+            body.update(_structured(req.output_format, strategy))
         if stream:
             body["stream"] = True
-        body.update(req.provider_options.get(ANTHROPIC_MESSAGES, {}))
-        return WireRequest(body=body, stream=stream)
+        body = merge_provider_options(body, req.provider_options.get(ANTHROPIC_MESSAGES, {}))
+        return WireRequest(body=body, stream=stream, unverified=frozenset(unverified))
 
     def from_response(
         self,
@@ -200,14 +256,18 @@ class AnthropicMessagesAdapter(Adapter[PromptPackage, ModelResponse]):
         which covers both an absent key and an explicit `null`, so a reply that
         reports nothing still yields a usable record.
 
+        When the package asked for a JSON answer, `structured` is the forced tool's
+        `input` if the reply holds that `tool_use` block, else the text blocks parsed
+        as JSON; see `read_structured`. A tool-calling answer therefore has
+        `structured` set and no items, since the tool call is not an item yet.
+
         `trace` is left `None` deliberately. The leaf stamps it once the call is over,
         because latency, attempts and the selection route are facts about the call and
         not about the body -- an adapter that guessed at them would be overwritten.
 
         Args:
             raw: The decoded JSON body of the 200.
-            req: The package that produced it; unread here, since Anthropic answers
-                with a self-contained message.
+            req: The package that produced it, read only for its output format.
             model: The model identifier that was sent.
             provider: The provider that answered.
 
@@ -216,15 +276,21 @@ class AnthropicMessagesAdapter(Adapter[PromptPackage, ModelResponse]):
         """
         content: Sequence[Any] = raw.get("content") or ()
         usage: Mapping[str, Any] = raw.get("usage") or {}
+        items = tuple(
+            Item(role="assistant", kind="text", text=block.get("text"))
+            for block in content
+            if block.get("type") == "text"
+        )
+        calls = (
+            (block.get("name"), block.get("input"))
+            for block in content
+            if block.get("type") == "tool_use"
+        )
         return ModelResponse(
             model=model,
             provider=provider,
             dialect=ANTHROPIC_MESSAGES,
-            items=tuple(
-                Item(role="assistant", kind="text", text=block.get("text"))
-                for block in content
-                if block.get("type") == "text"
-            ),
+            items=items,
             stop_reason=raw.get("stop_reason"),
             usage=Usage(
                 input_tokens=usage.get("input_tokens") or 0,
@@ -233,5 +299,8 @@ class AnthropicMessagesAdapter(Adapter[PromptPackage, ModelResponse]):
                 cache_write_tokens=usage.get("cache_creation_input_tokens") or 0,
             ),
             served_model=raw.get("model"),
+            structured=read_structured(
+                req.output_format, "".join(item.text or "" for item in items), calls
+            ),
             raw=dict(raw),
         )
